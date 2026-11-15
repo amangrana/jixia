@@ -1,13 +1,13 @@
 # jixia
 
-当前包含 CLI 可行性测试和最小调度器核心，尚无网页界面、HTTP/WebSocket 服务或生产 CLI adapter。设计见 `jixia 设计文档 v1.md`，测试证据见 `jixia CLI 实测记录.md`。
+当前包含 CLI 可行性测试、最小调度器核心和 CLI adapter，尚无网页界面和 HTTP/WebSocket 服务；adapter 还没有接进调度器。设计见 `jixia 设计文档 v1.md`，测试证据见 `jixia CLI 实测记录.md`。
 
 ## 运行核心测试
 
 需要 Node 24 或更新版本，利用 Node 原生 TypeScript 类型擦除执行，不需要安装 npm 依赖。
 
 ```powershell
-node --test tests/scheduler.test.ts tests/routing.test.ts
+node --test tests/scheduler.test.ts tests/routing.test.ts tests/cli.test.ts
 ```
 
 普通安装了 npm 的终端也可以运行 `npm test`。这些测试只调用模拟 bot，不消耗模型额度，使用项目内随机临时目录并在完成后清理。测试包括终止自己创建的测试子进程来模拟崩溃。
@@ -24,6 +24,18 @@ node --test tests/scheduler.test.ts tests/routing.test.ts
 - `queue`、`history`：返回快照，不向外暴露可变状态。
 
 一个 bot 失败会记录 failure，另一个继续完成；下一轮等待所有结果落盘。Bot adapter 收到独立的本轮历史快照；永久记忆、compact、结构化记忆请求和进程超时回收尚未接入核心。未来 adapter 需在超时时完成进程树回收后再返回失败。
+
+## CLI adapter
+
+`src/cli.ts` 的 `runCli(config, prompt)` 发起一次全新的 headless 调用：prompt 走 stdin，返回校验过的 `{reply, memoryRequests}`，任何失败都抛出 `CliError`（`kind` 为 `spawn`、`timeout`、`exit` 或 `invalid-output`）。参数按设计文档“实测确定的调用方式”拼装；超时后终止整个进程树，等进程关闭后才返回失败；子进程环境里会去掉会让调用改走 API 计费的变量。
+
+`config` 需要 `provider`（`claude` 或 `codex`）、`workDir`（已存在的空目录）、`readDir`（Claude Code 可读的目录，即 jixia 文件夹）和 `timeoutMs`；可选 `model`、`effort`（仅 Claude Code）、`executable`。
+
+真实调用的检查脚本不在 `npm test` 里，每次运行发 4 个短请求、消耗订阅额度：
+
+```powershell
+node tests/cli-live.mjs
+```
 
 ## 存储选择与限制
 
