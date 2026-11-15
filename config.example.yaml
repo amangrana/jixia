@@ -3,7 +3,7 @@
 
 port: 4517                # 只监听 127.0.0.1
 
-bots:                     # model 和 effort 是新建群时的初始选择；之后在界面上按群改
+bots:                     # model 和 effort 只是新建群时的初始选择，可以不写；不写时跟随 CLI 的默认。之后在界面上按群改
   claude:
     provider: claude      # Claude Code
     # model: sonnet

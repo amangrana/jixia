@@ -4,8 +4,9 @@ import { extname, join, resolve, sep } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
-import { GroupNotFoundError } from './groups.ts';
-import { MessageTooLongError, NotQueuedError } from './scheduler.ts';
+import { GroupBusyError, GroupNotFoundError } from './groups.ts';
+import type { QuotaMonitor } from './quota.ts';
+import { GroupRetiredError, MessageTooLongError, NotQueuedError } from './scheduler.ts';
 import type { Groups } from './groups.ts';
 
 // Local HTTP + WebSocket front for the browser. The browser sends commands
@@ -80,7 +81,7 @@ async function serveStatic(staticDir: string | undefined, pathname: string, resp
   response.end(content);
 }
 
-export async function startServer(options: { groups: Groups; port: number; staticDir?: string }): Promise<RunningServer> {
+export async function startServer(options: { groups: Groups; port: number; staticDir?: string; quota?: QuotaMonitor }): Promise<RunningServer> {
   const { groups } = options;
 
   async function route(request: IncomingMessage, url: URL): Promise<{ status?: number; body: unknown }> {
@@ -89,6 +90,9 @@ export async function startServer(options: { groups: Groups; port: number; stati
     const is = (verb: string, ...shape: (string | null)[]) => method === verb && parts.length === shape.length && shape.every((part, index) => part === null || part === parts[index]);
 
     if (is('GET', 'api', 'status')) return { body: { bots: groups.bots } };
+    // Usage of each subscription, keyed by provider. Empty when no monitor runs.
+    if (is('GET', 'api', 'quota')) return { body: { quotas: options.quota?.get() ?? {} } };
+    if (is('POST', 'api', 'quota', 'refresh')) { await options.quota?.refresh(); return { body: { quotas: options.quota?.get() ?? {} } }; }
     if (is('GET', 'api', 'groups')) return { body: { groups: groups.list() } };
     if (is('POST', 'api', 'groups')) return { status: 201, body: { group: await groups.create((await readJson(request)).name) } };
 
@@ -98,8 +102,11 @@ export async function startServer(options: { groups: Groups; port: number; stati
       return { body: await groups.use(id, scheduler => {
         const history = scheduler.history;
         const records = history.slice(-pageSize(url.searchParams.get('limit')));
-        return { group, records, hasMore: records.length < history.length, queue: scheduler.queue, round: scheduler.round, selection: groups.selection(id) };
+        return { group, records, hasMore: records.length < history.length, messageCount: history.length, queue: scheduler.queue, round: scheduler.round, selection: groups.selection(id) };
       }) };
+    }
+    if (is('DELETE', 'api', 'groups', null)) {
+      return { body: { group: await groups.remove(id) } };
     }
     if (is('PUT', 'api', 'groups', null, 'models', null)) {
       const body = await readJson(request);
@@ -136,7 +143,8 @@ export async function startServer(options: { groups: Groups; port: number; stati
 
   const failure = (error: unknown): { status: number; body: { error: string; code: string } } => {
     if (error instanceof HttpError) return { status: error.status, body: { error: error.message, code: 'bad-request' } };
-    if (error instanceof GroupNotFoundError) return { status: 404, body: { error: error.message, code: 'group-not-found' } };
+    if (error instanceof GroupNotFoundError || error instanceof GroupRetiredError) return { status: 404, body: { error: '群不存在', code: 'group-not-found' } };
+    if (error instanceof GroupBusyError) return { status: 409, body: { error: error.message, code: 'group-busy' } };
     if (error instanceof MessageTooLongError) return { status: 413, body: { error: error.message, code: 'message-too-long' } };
     if (error instanceof NotQueuedError) return { status: 409, body: { error: '消息已开始处理', code: 'not-queued' } };
     if (error instanceof RangeError) return { status: 400, body: { error: error.message, code: 'bad-request' } };
@@ -169,10 +177,12 @@ export async function startServer(options: { groups: Groups; port: number; stati
   });
   // No replay on connect: a client that (re)connects fetches the group over
   // HTTP, then applies whatever is pushed from here on.
-  const unsubscribe = groups.subscribe(event => {
+  const broadcast = (event: unknown) => {
     const text = JSON.stringify(event);
     for (const client of sockets.clients) if (client.readyState === client.OPEN) client.send(text);
-  });
+  };
+  const unsubscribeQuota = options.quota?.subscribe(quotas => broadcast({ type: 'quota', quotas }));
+  const unsubscribe = groups.subscribe(broadcast);
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -182,6 +192,7 @@ export async function startServer(options: { groups: Groups; port: number; stati
     port: (server.address() as AddressInfo).port,
     close: async () => {
       unsubscribe();
+      unsubscribeQuota?.();
       for (const client of sockets.clients) client.terminate();
       sockets.close();
       server.closeAllConnections();

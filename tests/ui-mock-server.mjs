@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveConfig } from '../src/config.ts';
 import { Groups } from '../src/groups.ts';
 import { startServer } from '../src/server.ts';
+import { createQuotaMonitor } from '../src/quota.ts';
 
 const project = dirname(dirname(fileURLToPath(import.meta.url)));
 const root = await mkdtemp(join(tmpdir(), 'jixia-ui-'));
@@ -35,8 +36,8 @@ const named = (run, fallback) => async input => {
 };
 // A small made-up catalog, shaped like the startup query's result. chatgpt's carries a note, as after a failed query.
 const MODELS = {
-  claude: { models: [{ id: 'fable', name: 'Fable 5.2', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { id: 'sonnet', name: 'Sonnet 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5', efforts: [] }], defaultEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-  codex: { models: [{ id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] }, { id: 'gpt-6-luna', name: 'GPT-6-Luna', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }], defaultEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], note: 'Codex 的模型列表没有更新（模拟），沿用 2026-11-14 查到的列表' },
+  claude: { defaultModel: { id: 'claude-opus-5-5', name: 'Opus 5.5' }, models: [{ id: 'fable', name: 'Fable 5.2', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { id: 'sonnet', name: 'Sonnet 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5', efforts: [] }], defaultEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  codex: { defaultModel: { id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol' }, defaultEffort: 'low', models: [{ id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], defaultEffort: 'low' }, { id: 'gpt-6-luna', name: 'GPT-6-Luna', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' }], defaultEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], note: 'Codex 的模型列表没有更新（模拟），沿用 2026-11-14 查到的列表' },
 };
 const config = resolveConfig({});
 const groups = await Groups.open({
@@ -45,7 +46,15 @@ const groups = await Groups.open({
   bots: { claude: named(bot('claude', 900), 'claude-fable-5-2'), chatgpt: named(bot('chatgpt', 1800), '默认模型') },
   models: MODELS,
 });
-const server = await startServer({ groups, port: Number(process.argv[2] ?? 4599), staticDir: join(project, 'web', 'dist') });
+// Made-up usage: claude reads fine and climbs each refresh; codex reads once, then fails, to show a kept reading.
+let claudeUsed = 64, codexReads = 0;
+const inHours = hours => new Date(Date.now() + hours * 3600_000).toISOString();
+const quota = createQuotaMonitor({ providers: ['claude', 'codex'], deps: {
+  run: async () => { claudeUsed = Math.min(100, claudeUsed + 13); return { stdout: JSON.stringify({ type: 'control_response', response: { subtype: 'success', response: { rate_limits_available: true, rate_limits: { five_hour: { utilization: claudeUsed, resets_at: inHours(3) }, seven_day: { utilization: 15, resets_at: inHours(110) } } } } }), exitCode: 0, timedOut: false }; },
+  openCodex: async () => ({ request: async method => { if (method === 'initialize') return {}; if (codexReads++) throw new Error('模拟：查询超时'); return { rateLimits: { primary: { usedPercent: 20, windowDurationMins: 300, resetsAt: Date.now() / 1000 + 7200 }, secondary: { usedPercent: 17, windowDurationMins: 10080, resetsAt: Date.now() / 1000 + 400000 } } }; }, close: () => {} }),
+} });
+quota.start();
+const server = await startServer({ groups, port: Number(process.argv[2] ?? 4599), staticDir: join(project, 'web', 'dist'), quota });
 console.log(`jixia UI (mock bots): http://127.0.0.1:${server.port}`);
 const stop = async () => { await server.close(); await rm(root, { recursive: true, force: true }); process.exit(0); };
 process.on('SIGINT', stop);

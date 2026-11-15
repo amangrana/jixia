@@ -6,6 +6,7 @@ import WebSocket from 'ws';
 import { resolveConfig } from '../src/config.ts';
 import { Groups } from '../src/groups.ts';
 import { startServer } from '../src/server.ts';
+import { createQuotaMonitor } from '../src/quota.ts';
 import type { LoginStatus } from '../src/auth.ts';
 import type { Bot } from '../src/scheduler.ts';
 
@@ -276,4 +277,61 @@ test('each group has its own model choice: defaults for a new group, changes app
   assert.deepEqual((await again.api('GET', `/api/groups/${a}`)).body.selection, { claude: { model: 'opus', effort: 'max' } });
   assert.deepEqual((await again.api('GET', `/api/groups/${b}`)).body.selection, { claude: {} });
   assert.deepEqual((await again.api('GET', `/api/groups/${await again.newGroup('丙')}`)).body.selection, { claude: { model: 'haiku' } });
+});
+
+test('a group can be deleted: its folder moves to data/deleted, and a group that is answering cannot be deleted', async t => {
+  const gate = deferred<string>(), started = deferred<void>();
+  const app = await start(t, { bots: { claude: async input => { if (input.message.id !== 'slow') return 'ok'; started.resolve(); return gate.promise; } }, config: { bots: { claude: { provider: 'claude' } } } });
+  const keep = await app.newGroup('留着'), gone = await app.newGroup('要删');
+  await app.api('POST', `/api/groups/${gone}/messages`, { id: 'slow', content: '慢的' });
+  await app.api('POST', `/api/groups/${gone}/messages`, { id: 'queued', content: '排队的' });
+  await started.promise;
+  assert.equal((await app.api('GET', `/api/groups/${gone}`)).body.messageCount, 1);
+  // Answering: refused, and nothing changes.
+  const busy = await app.api('DELETE', `/api/groups/${gone}`);
+  assert.deepEqual([busy.status, busy.body.code], [409, 'group-busy']);
+  assert.match(busy.body.error, /正在回答/);
+  gate.resolve('done');
+  // The queued message runs next; delete as soon as the group is between rounds.
+  let deleted: Awaited<ReturnType<typeof app.api>> | undefined;
+  await until(async () => (deleted = await app.api('DELETE', `/api/groups/${gone}`)).status === 200, 'the group to be deletable');
+  assert.equal(deleted!.body.group.name, '要删');
+  assert.deepEqual((await app.api('GET', '/api/groups')).body.groups.map((g: Json) => g.name), ['留着']);
+  assert(app.events.some(e => e.type === 'groups' && e.groups.length === 1));
+  assert.equal((await app.api('GET', `/api/groups/${gone}`)).status, 404);
+  assert.equal((await app.api('POST', `/api/groups/${gone}/messages`, { id: 'late', content: '晚了' })).status, 404);
+  assert.equal((await app.api('DELETE', `/api/groups/${gone}`)).status, 404);
+  // Moved, not erased; the other group is untouched and still works.
+  assert((await readFile(join(app.root, 'data', 'deleted', gone, 'events.jsonl'), 'utf8')).includes('慢的'));
+  await assert.rejects(readFile(join(app.root, 'data', 'groups', gone, 'group.json'), 'utf8'), /ENOENT/);
+  await app.api('POST', `/api/groups/${keep}/messages`, { id: 'k1', content: '还在' });
+  await until(async () => (await app.api('GET', `/api/groups/${keep}`)).body.records.length === 2, 'the other group to answer');
+  // After a restart the deleted group stays gone.
+  await app.close();
+  const again = await start(t, { root: app.root, bots: { claude: async () => 'ok' }, config: { bots: { claude: { provider: 'claude' } } } });
+  assert.deepEqual((await again.api('GET', '/api/groups')).body.groups.map((g: Json) => g.name), ['留着']);
+});
+
+test('quota readings are served, refreshed on request and pushed over the WebSocket', async t => {
+  const root = await mkdtemp(join(process.cwd(), '.server-test-'));
+  await mkdir(join(root, 'prompts'));
+  await writeFile(join(root, 'prompts', 'system.md'), '你是 {{self}}');
+  let used = 10;
+  const monitor = createQuotaMonitor({ providers: ['claude'], deps: {
+    run: async () => ({ stdout: JSON.stringify({ type: 'control_response', response: { subtype: 'success', response: { rate_limits_available: true, rate_limits: { five_hour: { utilization: used }, seven_day: { utilization: 5 } } } } }), exitCode: 0, timedOut: false }),
+    openCodex: async () => { throw new Error('not used'); },
+  } });
+  await monitor.refresh();
+  const groups = await Groups.open({ root, config: resolveConfig({ bots: { claude: { provider: 'claude' } } }), logins: {}, bots: { claude: echo('claude') } });
+  const server = await startServer({ groups, port: 0, quota: monitor });
+  const events: Json[] = [];
+  const socket = new WebSocket(`ws://127.0.0.1:${server.port}/ws`);
+  socket.on('message', data => events.push(JSON.parse(data.toString())));
+  await new Promise(resolve => socket.once('open', resolve));
+  t.after(async () => { socket.terminate(); await server.close(); await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); });
+  const call = async (method: string, path: string) => (await fetch(`http://127.0.0.1:${server.port}${path}`, { method })).json() as Promise<Json>;
+  assert.equal((await call('GET', '/api/quota')).quotas.claude.quota.fiveHour.usedPercent, 10);
+  used = 42;
+  assert.equal((await call('POST', '/api/quota/refresh')).quotas.claude.quota.fiveHour.usedPercent, 42);
+  await until(() => events.some(e => e.type === 'quota' && e.quotas.claude.quota.fiveHour.usedPercent === 42), 'the new reading to be pushed');
 });

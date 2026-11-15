@@ -33,6 +33,10 @@ export type SchedulerEvent =
   | { type: 'queue'; queue: PendingMessage[] }
   | { type: 'round'; round: RoundState | null };
 export type SchedulerOptions = { prepare?: Prepare; maxMessageTokens?: number; applyMemory?: ApplyMemory; onEvent?: (event: SchedulerEvent) => void };
+/** The group was deleted; nothing more can be done in it. */
+export class GroupRetiredError extends Error {
+  constructor() { super('这个群已删除'); this.name = 'GroupRetiredError'; }
+}
 /** The message already started processing (or was removed), so it can no longer be edited, deleted or moved. */
 export class NotQueuedError extends Error {
   constructor() { super('Message is no longer queued'); this.name = 'NotQueuedError'; }
@@ -68,6 +72,8 @@ export class Scheduler {
   #running: Promise<void> | undefined;
   #nextSeq = 1;
   #poisoned = false;
+  // Set by retire(): the group is being deleted, so nothing more is written.
+  #retired = false;
   recoveryNotes: string[] = [];
 
   private constructor(directory: string, bots: Record<string, Bot>, options: SchedulerOptions) {
@@ -155,6 +161,7 @@ export class Scheduler {
   }
 
   async #record(event: Event): Promise<void> {
+    if (this.#retired) throw new GroupRetiredError();
     if (this.#poisoned) throw new Error('Storage failed; reopen scheduler before continuing');
     // Any failure, including open and close, leaves it unknown whether the
     // event reached the disk. Memory may then be ahead of or behind the journal,
@@ -230,6 +237,21 @@ export class Scheduler {
     });
   }
 
+  /**
+   * Stops this group for good, for deletion. Runs in the same serial order as
+   * starting a round, so it either happens before the next round starts or
+   * waits for nothing: it refuses (returns false) while a round is running,
+   * because a running round cannot be cancelled. After it returns true, nothing
+   * is written and no round starts; queued messages are left as they are.
+   */
+  retire(): Promise<boolean> {
+    return this.#serial(async () => {
+      if (this.#active) return false;
+      this.#retired = true;
+      return true;
+    });
+  }
+
   moveToTop(id: string): Promise<void> {
     return this.#serial(async () => {
       if (!this.#queue.some(m => m.id === id)) throw new NotQueuedError();
@@ -252,6 +274,7 @@ export class Scheduler {
   async #drain(): Promise<void> {
     while (true) {
       const input = await this.#serial(async () => {
+        if (this.#retired) return undefined;
         if (this.#poisoned) throw new Error('Storage failed; reopen scheduler before continuing');
         // Starting a round would overwrite the unfinished one and drop its missing answers.
         if (this.#active) throw new Error('Previous round is unfinished; reopen scheduler before continuing');

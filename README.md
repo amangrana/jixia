@@ -38,12 +38,16 @@ npm test
 
 - 左边是群列表和 bot 状态；有回答在进行的群显示转圈，别的群来了新回答显示圆点。
 - 不 @ 时所有 bot 回答，`@claude`、`@chatgpt` 只让被点名的回答。Enter 发送，Shift+Enter 换行。
+- 在词首输入 `@` 时弹出可选的 bot 和 `@all`，继续输入字母会过滤。↑↓ 选择，Enter 或 Tab 补全，Esc 关掉列表；Backspace 照常删字，删掉 `@` 时列表消失。
 - 当前这轮没结束时可以继续发，消息进入“排队中”，每条可以移到队首、编辑、删除。编辑会把原文追加到输入框里已有草稿的后面，重新发送后排到队尾。
 - 发送失败或消息过长时，文字留在输入框里。没发出去的草稿按群保存在浏览器里，刷新不丢。
 - 连接断开时顶部有提示，并自动重连；重连后重新拉取当前群的记录和队列。
 - 输入框上方每个可用的 bot 有两个下拉框：模型和 effort。选择属于当前这个群，改了之后一直保持，重启后还在；对之后开始的每一轮生效，包括已经在排队的消息，正在进行的一轮不受影响。“默认”表示不指定，由 CLI 决定。effort 只列出所选模型支持的档位，换模型后不再支持的 effort 回到默认。
-- 新建群时套用 `config.yaml` 里各 bot 的 `model` 和 `effort`。
+- 下拉框的“默认”项写出 CLI 自己的默认值，例如“默认（Opus 5.5）”“默认（low）”；CLI 不报告的（Claude 的默认 effort）只写“默认”。
+- 新建群时套用 `config.yaml` 里各 bot 的 `model` 和 `effort`。这两项可以不写：不写时新群选“默认”，跟随 CLI 的默认模型，CLI 升级换了默认时也跟着换。
+- 群标题右边的“删除群”会先确认，再把群文件夹移到 `data/deleted/`，需要时手动移回 `data/groups/` 并重启即可恢复。正在回答的群不能删。
 - bot 名字旁有 ⚠ 时，表示这次启动没查到它的模型列表，鼠标停在上面能看到原因。
+- 左边栏的 bot 下面是订阅额度：“5 小时”和“每周”各一条进度条，显示已用百分比和重置时间，70% 起变黄、90% 起变红。启动时和之后每 5 分钟自动更新，“刷新”立即更新。这是整个订阅账号的用量，网页聊天和别处的 CLI 使用都算在里面。查询失败时保留上次的数值并变灰，写明是多久以前的。
 - 每条回答的 bot 名字旁边显示回答它的模型，指定了 effort 时一并显示。失败的回答和这项功能之前的旧记录不显示。
 - 跟随系统的浅色或深色模式。
 
@@ -69,12 +73,14 @@ node tests/ui-mock-server.mjs
 
 | 方法和路径 | 作用 |
 | --- | --- |
-| `GET /api/status` | 各 bot 是否启用、登录类型检查结果 |
+| `GET /api/status` | 各 bot 是否启用、登录类型检查结果、模型列表 |
+| `GET /api/quota`、`POST /api/quota/refresh` | 各 CLI 的订阅额度用量；后者立即重新查询。更新通过 `/ws` 推送 `{type: "quota", quotas}` |
 | `GET /api/groups` | 群列表 |
 | `POST /api/groups` | 新建群，传 `name`；`id` 由后端生成 |
 | `GET /api/groups/:id` | 记录尾部（默认最近 200 条，可传 `limit`）、`hasMore`、当前队列、进行中的轮次 |
 | `GET /api/groups/:id/records?before=&limit=` | 往前翻更早的记录 |
 | `POST /api/groups/:id/messages` | 发送消息，传前端生成的 `id` 和 `content`；返回 202。同一 `id` 同样内容重发不会重复入队 |
+| `DELETE /api/groups/:id` | 删除群：文件夹移到 `data/deleted/`；正在回答时返回 409 `group-busy` |
 | `DELETE /api/groups/:id/queue/:messageId` | 从队列移除并返回原文，删除和编辑都用它 |
 | `POST /api/groups/:id/queue/:messageId/top` | 移到队首，返回新队列 |
 
@@ -127,12 +133,25 @@ node tests/server-live.mjs
 
 返回值另带 `model`（和指定了时的 `effort`），调度器把它记在该条回答上，写进 `events.jsonl` 和 `records.jsonl`，但不放进发给 bot 的上下文。Claude Code 每次调用都会报告实际使用的模型，记的是这个名字（例如选 `haiku` 记为 `claude-haiku-5-5`）。Codex 的输出里没有模型名，记的是传给它的名称；没有指定时记为“默认模型”。
 
+## 订阅额度
+
+`src/quota.ts`。查询不调用模型、不消耗额度，两个 CLI 合计约 1 秒：
+
+- Claude Code：和查模型列表同一个通道，发 `get_usage` 控制请求，读 `rate_limits` 里的 `five_hour` 和 `seven_day`。
+- Codex：`codex app-server` 的 `account/rateLimits/read`，按窗口长度区分 5 小时（300 分钟）和每周（10080 分钟）。
+
+两者都不是 CLI 的正式功能，升级后可能失效。只查登录方式为订阅的 CLI。真实查询的检查脚本，不花额度：
+
+```powershell
+node tests/quota-live.mjs
+```
+
 ## 模型列表与按群选择
 
 `src/models.ts`。每次启动向两个 CLI 各查一次模型列表，不调用模型、不消耗额度，两个查询合计约 1.5 秒：
 
-- Codex：`codex debug models`，标为隐藏的模型不列出。
-- Claude Code：启动 CLI 后从 stdin 发一条 `initialize` 控制请求，不发 prompt，从响应里读 `models`。
+- Codex：启动 `codex app-server`，按 JSON-RPC 发 `initialize` 后请求 `model/list`，隐藏的模型不列出。它标出默认模型和每个模型的默认 effort。
+- Claude Code：启动 CLI 后从 stdin 发一条 `initialize` 控制请求，不发 prompt，从响应里读 `models`；其中 `default` 一项给出默认模型，不给默认 effort。
 
 结果存到 `data/models.json`。某个 CLI 查询失败时沿用上次存下的列表，并在界面上提示；从没查到过时只能用默认模型。这两种查询方式都不是 CLI 的正式功能，CLI 升级后可能失效。查询成功只说明 CLI 能启动，不代表发消息一定能得到回答；列表里的模型也不保证在当前订阅下都能用，不能用的在调用时失败并显示原因。
 

@@ -74,6 +74,9 @@ test('the model that answered comes from what Claude Code reports; Codex falls b
   assert.equal(usedModel('claude', 'not json', undefined), '默认模型');
   assert.equal(usedModel('codex', stdout, 'gpt-x'), 'gpt-x');
   assert.equal(usedModel('codex', '', undefined), '默认模型');
+  // No model given: the default the startup query reported.
+  assert.equal(usedModel('codex', '', undefined, 'gpt-6.1-sol'), 'gpt-6.1-sol');
+  assert.equal(usedModel('codex', '', 'gpt-6-luna', 'gpt-6.1-sol'), 'gpt-6-luna');
 });
 
 test('the stable part goes to Claude Code as a system prompt file; Codex and anything unexpected get it all on stdin', () => {

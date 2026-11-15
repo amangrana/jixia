@@ -3,8 +3,8 @@ import type { FormEvent, KeyboardEvent } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api, ApiError } from './api.ts';
-import { appendToDraft, counters, effortsFor, groupState, initialState, reducer, withModel } from './state.ts';
-import type { BotStatus, ChatMessage, Choice, GroupState, PendingMessage, Selection, ServerEvent, State } from './state.ts';
+import { ageText, appendToDraft, completeMention, counters, defaultLabels, effortsFor, groupState, initialState, mentionAt, mentionOptions, quotaLevel, reducer, resetText, withModel } from './state.ts';
+import type { BotStatus, ChatMessage, Choice, GroupState, PendingMessage, QuotaState, Selection, ServerEvent, State } from './state.ts';
 
 // Unsent text per group. Kept in this browser so a reload does not lose it.
 const DRAFTS_KEY = 'jixia.drafts';
@@ -24,6 +24,7 @@ export function App() {
   stateRef.current = state;
   const [drafts, setDrafts] = useState(loadDrafts);
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
+  const [refreshingQuota, setRefreshingQuota] = useState(false);
   const nextToast = useRef(0);
 
   const toast = useCallback((text: string) => {
@@ -54,9 +55,10 @@ export function App() {
         attempt = 0;
         dispatch({ type: 'connection', connected: true });
         try {
-          const [{ groups }, { bots }] = await Promise.all([api.groups(), api.status()]);
+          const [{ groups }, { bots }, { quotas }] = await Promise.all([api.groups(), api.status(), api.quota()]);
           dispatch({ type: 'groups', groups });
           dispatch({ type: 'bots', bots });
+          dispatch({ type: 'quotas', quotas });
         } catch (error) { toast(errorText(error)); }
         const open = stateRef.current.activeId;
         if (open) void loadGroup(open);
@@ -82,12 +84,28 @@ export function App() {
       <Sidebar state={state} onSelect={id => dispatch({ type: 'select', id })} onCreate={async name => {
         try { const { group } = await api.createGroup(name); dispatch({ type: 'select', id: group.id }); return true; }
         catch (error) { toast(errorText(error)); return false; }
+      }} refreshing={refreshingQuota} onRefreshQuota={async () => {
+        setRefreshingQuota(true);
+        // The new values also arrive by push; applying the reply covers a dropped connection.
+        try { dispatch({ type: 'quotas', quotas: (await api.refreshQuota()).quotas }); }
+        catch (error) { toast(errorText(error)); }
+        finally { setRefreshingQuota(false); }
       }} />
       <main className="chat">
         {!state.connected && <div className="banner" role="status">和后端的连接断开了，正在重连…</div>}
         {active
           ? <Chat key={active.id} id={active.id} name={active.name} group={groupState(state, active.id)} bots={state.bots}
               draft={drafts[active.id] ?? ''} setDraft={change => setDraft(active.id, change)} toast={toast}
+              onDelete={async () => {
+                try {
+                  // The count comes from the server: the page may hold only the latest records.
+                  const { messageCount } = await api.snapshot(active.id);
+                  if (!window.confirm(`删除群「${active.name}」？共 ${messageCount} 条消息。\n\n群文件夹会移到 data/deleted/，需要时可以手动移回来恢复。`)) return;
+                  await api.deleteGroup(active.id);
+                  // The group list itself updates from the backend's push.
+                  setDraft(active.id, () => '');
+                } catch (error) { toast(errorText(error)); }
+              }}
               onOlder={(records, hasMore) => dispatch({ type: 'older', id: active.id, records, hasMore })} />
           : <div className="empty"><h2>还没有群</h2><p>在左边新建一个群，一个话题开一个群，上下文更短、更集中。</p></div>}
       </main>
@@ -96,7 +114,7 @@ export function App() {
   );
 }
 
-function Sidebar({ state, onSelect, onCreate }: { state: State; onSelect: (id: string) => void; onCreate: (name: string) => Promise<boolean> }) {
+function Sidebar({ state, onSelect, onCreate, onRefreshQuota, refreshing }: { state: State; onSelect: (id: string) => void; onCreate: (name: string) => Promise<boolean>; onRefreshQuota: () => void; refreshing: boolean }) {
   const [name, setName] = useState('');
   const [creating, setCreating] = useState(false);
   const submit = async (event: FormEvent) => {
@@ -122,22 +140,53 @@ function Sidebar({ state, onSelect, onCreate }: { state: State; onSelect: (id: s
           </button>
         ))}
       </nav>
-      <ul className="bots" aria-label="bot 状态">
-        {state.bots.map(bot => (
-          <li key={bot.name} className={bot.enabled ? 'bot' : 'bot off'}>
-            <span className="bot-line"><span className="dot" /> @{bot.name}<span className="bot-state">{bot.enabled ? '可用' : '未启用'}</span></span>
-            {!bot.enabled && <span className="bot-detail">{bot.login.detail}</span>}
-          </li>
-        ))}
-      </ul>
+      <div className="bots">
+        {Object.keys(state.quotas).length > 0 && (
+          <div className="quota-head">
+            <span>订阅额度（整个账号）</span>
+            <button onClick={onRefreshQuota} disabled={refreshing} title="立即重新查询，平时每 5 分钟自动更新">{refreshing ? '查询中…' : '刷新'}</button>
+          </div>
+        )}
+        <ul aria-label="bot 状态">
+          {state.bots.map(bot => (
+            <li key={bot.name} className={bot.enabled ? 'bot' : 'bot off'}>
+              <span className="bot-line"><span className="dot" /> @{bot.name}<span className="bot-state">{bot.enabled ? '可用' : '未启用'}</span></span>
+              {!bot.enabled && <span className="bot-detail">{bot.login.detail}</span>}
+              {state.quotas[bot.provider] && <QuotaBars state={state.quotas[bot.provider]} />}
+            </li>
+          ))}
+        </ul>
+      </div>
     </aside>
   );
 }
 
-function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder }: {
+// The two usage windows of one subscription. A reading kept after a failed
+// read is greyed and says how old it is.
+function QuotaBars({ state }: { state: QuotaState }) {
+  const now = new Date();
+  if (!state.quota) return <span className="bot-detail quota-missing" title={state.error}>额度查不到{state.error ? `：${state.error}` : ''}</span>;
+  const stale = Boolean(state.error);
+  const rows = [['5 小时', state.quota.fiveHour], ['每周', state.quota.weekly]] as const;
+  return (
+    <div className={stale ? 'quota stale' : 'quota'} title={stale ? `最近一次查询失败：${state.error}` : undefined}>
+      {rows.map(([label, window]) => window && (
+        <div key={label} className={`quota-row ${quotaLevel(window.usedPercent)}`}>
+          <div className="quota-text"><span>{label} · 已用 {window.usedPercent}%</span><span>{resetText(window.resetsAt, now)}</span></div>
+          <div className="quota-bar" role="progressbar" aria-label={`${label}已用`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={window.usedPercent}>
+            <span style={{ width: `${window.usedPercent}%` }} />
+          </div>
+        </div>
+      ))}
+      {stale && <div className="quota-age">{ageText(state.checkedAt, now)}的数据，最近一次查询失败</div>}
+    </div>
+  );
+}
+
+function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder, onDelete }: {
   id: string; name: string; group: GroupState; bots: BotStatus[]; draft: string;
   setDraft: (change: (draft: string) => string) => void; toast: (text: string) => void;
-  onOlder: (records: ChatMessage[], hasMore: boolean) => void;
+  onOlder: (records: ChatMessage[], hasMore: boolean) => void; onDelete: () => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -191,9 +240,41 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder }: {
       toast(errorText(error));
     } finally { input.current?.focus(); }
   };
+  // @ completion. The list follows the text before the caret; Esc hides it for
+  // that one mention, and it stays hidden until that @ is gone.
+  const [caret, setCaret] = useState(0);
+  const [composing, setComposing] = useState(false);
+  const [dismissedAt, setDismissedAt] = useState<number | null>(null);
+  const [highlighted, setHighlighted] = useState(0);
+  const usable = bots.filter(bot => bot.enabled).map(bot => bot.name);
+  const mention = composing ? null : mentionAt(draft, caret);
+  const options = mention && mention.start !== dismissedAt ? mentionOptions(usable, mention.query) : [];
+  const listOpen = options.length > 0;
+  const current = Math.min(highlighted, Math.max(0, options.length - 1));
+  const trackCaret = (element: HTMLTextAreaElement) => setCaret(element.selectionStart ?? element.value.length);
+
+  const complete = (name: string) => {
+    const result = completeMention(draft, caret, name);
+    setDraft(() => result.text);
+    setCaret(result.caret);
+    setHighlighted(0);
+    // The new text is in the box only after React renders it; put the caret after the inserted name then.
+    requestAnimationFrame(() => { input.current?.focus(); input.current?.setSelectionRange(result.caret, result.caret); });
+  };
+
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    // Enter while an IME is composing confirms the candidate; it must not send.
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); }
+    // Enter while an IME is composing confirms the candidate; it must not send or pick.
+    if (event.nativeEvent.isComposing) return;
+    if (listOpen) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        setHighlighted((current + (event.key === 'ArrowDown' ? 1 : options.length - 1)) % options.length);
+        return;
+      }
+      if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') { event.preventDefault(); complete(options[current]); return; }
+      if (event.key === 'Escape') { event.preventDefault(); setDismissedAt(mention!.start); return; }
+    }
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); }
   };
 
   const queueAction = async (action: () => Promise<unknown>) => {
@@ -229,6 +310,7 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder }: {
       <header className="chat-header">
         <h2>{name}</h2>
         {group.round && <span className="status">正在回答 · 还差 {group.round.pending.length} 个</span>}
+        <button className="delete-group" onClick={onDelete} disabled={!!group.round} title={group.round ? '这个群正在回答，等这一轮结束后再删' : '删除这个群'}>删除群</button>
       </header>
       {group.error && <div className="banner error" role="alert">{group.error}</div>}
       <div className="messages" ref={scroller} onScroll={event => { const element = event.currentTarget; stick.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80; }}>
@@ -266,8 +348,30 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder }: {
         try { await api.select(id, bot, choice); } catch (error) { toast(errorText(error)); }
       }} />
       <form className="composer" onSubmit={event => { event.preventDefault(); void send(); }}>
-        <textarea ref={input} value={draft} onChange={event => setDraft(() => event.target.value)} onKeyDown={onKeyDown} rows={1}
-          placeholder={group.round ? '可以继续发，消息会排队' : '发消息，Enter 发送'} title="Enter 发送，Shift+Enter 换行" aria-label="消息" />
+        {listOpen && (
+          <ul className="mentions" role="listbox" aria-label="选择要 @ 的 bot">
+            {options.map((option, index) => (
+              <li key={option} role="option" aria-selected={index === current} className={index === current ? 'active' : undefined}
+                // mousedown, not click: a click would first take the focus away from the input box.
+                onMouseDown={event => { event.preventDefault(); complete(option); }} onMouseEnter={() => setHighlighted(index)}>
+                @{option}{option === 'all' && <span className="mention-note">所有 bot</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+        <textarea ref={input} value={draft} rows={1}
+          onChange={event => {
+            const element = event.target;
+            setDraft(() => element.value);
+            trackCaret(element);
+            setHighlighted(0);
+            // Once that @ is gone, a new one at the same place opens the list again.
+            if (!mentionAt(element.value, element.selectionStart ?? element.value.length)) setDismissedAt(null);
+          }}
+          onSelect={event => trackCaret(event.currentTarget)} onKeyDown={onKeyDown}
+          onCompositionStart={() => setComposing(true)} onCompositionEnd={event => { setComposing(false); trackCaret(event.currentTarget); }}
+          role="combobox" aria-expanded={listOpen} aria-autocomplete="list"
+          placeholder={group.round ? '可以继续发，消息会排队' : '发消息，Enter 发送'} title="Enter 发送，Shift+Enter 换行，输入 @ 选择 bot" aria-label="消息" />
         <button type="submit" disabled={!draft.trim()}>发送</button>
       </form>
     </>
@@ -283,6 +387,7 @@ function ModelPickers({ bots, selection, disabled, onPick }: { bots: BotStatus[]
     <div className="pickers" aria-label="每个 bot 用的模型">
       {usable.map(bot => {
         const choice = selection[bot.name] ?? {};
+        const labels = defaultLabels(bot.models, choice);
         const efforts = effortsFor(bot.models, choice.model);
         // A saved choice that is no longer in the list stays visible instead of silently showing "默认".
         const unlisted = choice.model !== undefined && !bot.models.models.some(model => model.id === choice.model);
@@ -292,13 +397,13 @@ function ModelPickers({ bots, selection, disabled, onPick }: { bots: BotStatus[]
             <span className="picker-name">{bot.name}{bot.models.note ? ' ⚠' : ''}</span>
             <select aria-label={`${bot.name} 的模型`} disabled={disabled} value={choice.model ?? ''}
               onChange={event => onPick(bot.name, withModel(bot.models, choice, event.target.value || undefined))}>
-              <option value="">默认模型</option>
+              <option value="">{labels.model}</option>
               {unlisted && <option value={choice.model}>{choice.model}</option>}
               {bot.models.models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
             </select>
             <select aria-label={`${bot.name} 的 effort`} disabled={disabled || (!efforts.length && !strayEffort)} value={choice.effort ?? ''}
               onChange={event => onPick(bot.name, { ...(choice.model === undefined ? {} : { model: choice.model }), ...(event.target.value ? { effort: event.target.value } : {}) })}>
-              <option value="">默认 effort</option>
+              <option value="">{labels.effort}</option>
               {strayEffort && <option value={choice.effort}>{choice.effort}</option>}
               {efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
             </select>

@@ -1,6 +1,6 @@
 // Live check of model choice: the real startup query against both CLIs (no
 // model call), then one round where each bot is given a model and an effort.
-// Makes two short model calls and uses subscription quota. Not part of `npm test`.
+// Makes three short model calls and uses subscription quota. Not part of `npm test`.
 //   node tests/models-live.mjs
 import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -20,7 +20,8 @@ try {
   const started = Date.now();
   const models = await loadModels({ cachePath: join(root, 'data', 'models.json'), providers: ['claude', 'codex'], workDir: join(root, 'data', 'work') });
   const queryMs = Date.now() - started;
-  for (const [provider, list] of Object.entries(models)) console.log(`${provider}: ${list.note ?? list.models.map(model => `${model.id}[${model.efforts.join(',')}]`).join('  ')}\n  default efforts: ${list.defaultEfforts.join(',')}`);
+  for (const [provider, list] of Object.entries(models)) console.log(`${provider}: ${list.note ?? list.models.map(model => `${model.id}[${model.efforts.join(",")}]${model.defaultEffort ? `(default ${model.defaultEffort})` : ""}`).join("  ")}
+  default model: ${JSON.stringify(list.defaultModel)}, default effort: ${list.defaultEffort}, efforts without a model: ${list.defaultEfforts.join(",")}`);
 
   const logins = { claude: await checkLogin('claude'), chatgpt: await checkLogin('codex') };
   const groups = await Groups.open({ root, config: resolveConfig({ cliTimeoutSeconds: 180 }), logins, models });
@@ -34,7 +35,17 @@ try {
   const history = await groups.use(id, scheduler => scheduler.history);
   for (const message of history) console.log(JSON.stringify({ from: message.from, type: message.type, model: message.model, effort: message.effort, content: message.content }));
   const by = name => history.find(message => message.from === name);
+  // A second group where chatgpt keeps the CLI default: its answer should name that default.
+  const plain = (await groups.create('默认模型')).id;
+  await groups.select(plain, 'chatgpt', { model: null, effort: null });
+  await groups.use(plain, scheduler => scheduler.enqueue({ id: 'm2', content: '@chatgpt 只回复：好' }));
+  await groups.use(plain, scheduler => scheduler.runUntilIdle());
+  const plainReply = (await groups.use(plain, scheduler => scheduler.history)).find(message => message.from === 'chatgpt');
+  console.log(JSON.stringify({ from: 'chatgpt (default)', type: plainReply?.type, model: plainReply?.model, content: plainReply?.content }));
   const checks = {
+    'both CLIs named their default model': Boolean(models.claude.defaultModel && models.codex.defaultModel),
+    'Codex named a default effort for its default model and for each model': Boolean(models.codex.defaultEffort) && models.codex.models.every(model => model.defaultEffort),
+    'chatgpt with no model chosen records the default model by name': plainReply?.type === 'reply' && plainReply.model === models.codex.defaultModel?.id,
     'both model lists came from this start\'s query': !models.claude.note && !models.codex.note && models.claude.models.length > 0 && models.codex.models.length > 0,
     [`the two queries took under 15 seconds together (${queryMs} ms)`]: queryMs < 15000,
     'a small model was found for each bot': Boolean(pick.claude && pick.chatgpt),

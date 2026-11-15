@@ -20,9 +20,10 @@ export const DEFAULT_MODEL_LABEL = '默认模型';
 /**
  * The model that answered. Claude Code reports it per call; when it lists
  * several (a small model can do side work), the one that wrote the most output
- * is the answer's. Codex does not report it, so that is the configured model.
+ * is the answer's. Codex does not report it, so that is the model it was given,
+ * or else the default the startup query reported.
  */
-export function usedModel(provider: Provider, stdout: string, configured: string | undefined): string {
+export function usedModel(provider: Provider, stdout: string, configured: string | undefined, fallback?: string): string {
   if (provider === 'claude') {
     try {
       const usage = (JSON.parse(stdout) as { modelUsage?: Record<string, { outputTokens?: number }> }).modelUsage ?? {};
@@ -30,7 +31,7 @@ export function usedModel(provider: Provider, stdout: string, configured: string
       if (name) return name;
     } catch { /* fall through to what was configured */ }
   }
-  return configured ?? DEFAULT_MODEL_LABEL;
+  return configured ?? fallback ?? DEFAULT_MODEL_LABEL;
 }
 
 export type CliConfig = {
@@ -43,6 +44,8 @@ export type CliConfig = {
   executable?: string;
   model?: string;
   effort?: string;
+  /** The CLI's own default model as the startup query reported it; recorded when no model was given and the CLI does not say. */
+  defaultModel?: string;
   env?: NodeJS.ProcessEnv;
 };
 
@@ -268,7 +271,7 @@ export async function runCli(config: CliConfig, prompt: string, stable?: string)
     if (result.exitCode !== 0) throw new CliError('exit', `${NAME[config.provider]} 异常退出（退出码 ${result.exitCode}）`, tail(result.stderr || result.stdout));
     const final = config.provider === 'codex' ? await readFile(files.final, 'utf8').catch(() => undefined) : undefined;
     const output = parseOutput(config.provider, result.stdout, final);
-    return { ...output, model: usedModel(config.provider, result.stdout, config.model), ...(config.effort ? { effort: config.effort } : {}) };
+    return { ...output, model: usedModel(config.provider, result.stdout, config.model, config.defaultModel), ...(config.effort ? { effort: config.effort } : {}) };
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }

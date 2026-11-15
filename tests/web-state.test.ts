@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendToDraft, counters, effortsFor, groupState, initialState, mergeRecords, reducer, withModel } from '../web/src/state.ts';
+import { ageText, appendToDraft, completeMention, counters, defaultLabels, effortsFor, groupState, initialState, mentionAt, mentionOptions, mergeRecords, quotaLevel, reducer, resetText, withModel } from '../web/src/state.ts';
 import type { Action, ChatMessage, State } from '../web/src/state.ts';
 
 const msg = (seq: number, from = 'user', type: ChatMessage['type'] = from === 'user' ? 'user' : 'reply'): ChatMessage => ({ seq, id: `id-${seq}`, ts: '2026-11-15T00:00:00.000Z', from, type, content: `c${seq}` });
@@ -103,4 +103,56 @@ test('the model choice comes with the snapshot, follows pushes, and a stale snap
   state = reducer(state, { type: 'snapshot', id: 'a', snapshot: { ...snapshot([]), selection: { claude: { model: 'sonnet' } } }, seen });
   assert.deepEqual(groupState(state, 'a').selection, { claude: { model: 'opus', effort: 'high' } });
   assert.deepEqual(groupState(state, 'b').selection, {});
+});
+
+test('the "no choice" entries name the CLI default when it is known', () => {
+  const codex = { models: [{ id: 'sol', name: 'Sol', efforts: ['low', 'high'], defaultEffort: 'low' }, { id: 'luna', name: 'Luna', efforts: ['low', 'medium'], defaultEffort: 'medium' }, { id: 'old', name: 'Old', efforts: ['low'] }], defaultEfforts: ['low', 'high'], defaultModel: { id: 'sol', name: 'Sol' }, defaultEffort: 'low' };
+  assert.deepEqual(defaultLabels(codex, {}), { model: '默认（Sol）', effort: '默认（low）' });
+  // The effort default follows the chosen model.
+  assert.deepEqual(defaultLabels(codex, { model: 'luna' }), { model: '默认（Sol）', effort: '默认（medium）' });
+  assert.deepEqual(defaultLabels(codex, { model: 'old' }), { model: '默认（Sol）', effort: '默认 effort' });
+  // Claude Code names its default model but not its default effort; with no list there is nothing to name.
+  assert.deepEqual(defaultLabels({ models: [], defaultEfforts: [], defaultModel: { id: 'claude-opus-5-5', name: 'Opus 5.5' } }, {}), { model: '默认（Opus 5.5）', effort: '默认 effort' });
+  assert.deepEqual(defaultLabels({ models: [], defaultEfforts: [] }, {}), { model: '默认模型', effort: '默认 effort' });
+});
+
+test('an @ mention is found only at a word start, before the caret', () => {
+  assert.deepEqual(mentionAt('@', 1), { start: 0, query: '' });
+  assert.deepEqual(mentionAt('你好 @cl', 6), { start: 3, query: 'cl' });
+  assert.deepEqual(mentionAt('你好@cl', 5), { start: 2, query: 'cl' }); // Chinese right before @ still counts, as in routing.
+  assert.deepEqual(mentionAt('＠ch', 3), { start: 0, query: 'ch' });
+  assert.equal(mentionAt('a@b.com', 2), null); // An e-mail address is not a mention.
+  assert.equal(mentionAt('@claude 你好', 10), null); // The caret has moved past the mention.
+  assert.deepEqual(mentionAt('@claude 你好', 3), { start: 0, query: 'cl' });
+  assert.deepEqual(mentionOptions(['claude', 'chatgpt'], ''), ['claude', 'chatgpt', 'all']);
+  assert.deepEqual(mentionOptions(['claude', 'chatgpt'], 'C'), ['claude', 'chatgpt']);
+  assert.deepEqual(mentionOptions(['claude', 'chatgpt'], 'cha'), ['chatgpt']);
+  assert.deepEqual(mentionOptions(['claude', 'chatgpt'], 'x'), []);
+});
+
+test('completing a mention writes the full name and one space, and puts the caret after it', () => {
+  assert.deepEqual(completeMention('@cl', 3, 'claude'), { text: '@claude ', caret: 8 });
+  assert.deepEqual(completeMention('你看 @ch 怎么样', 6, 'chatgpt'), { text: '你看 @chatgpt 怎么样', caret: 12 });
+  // Letters after the caret are part of the same word and are replaced, not doubled.
+  assert.deepEqual(completeMention('@clau', 2, 'claude'), { text: '@claude ', caret: 8 });
+  assert.deepEqual(completeMention('没有提到', 2, 'claude'), { text: '没有提到', caret: 2 });
+});
+
+test('quota readings come with the lists and follow pushes; bars change colour at 70% and 90%', () => {
+  const reading = { claude: { quota: { fiveHour: { usedPercent: 34 }, weekly: { usedPercent: 15 } }, checkedAt: '2026-11-15T12:00:00.000Z' } };
+  let state = reducer(initialState, { type: 'quotas', quotas: reading });
+  assert.deepEqual(state.quotas, reading);
+  state = reducer(state, { type: 'event', event: { type: 'quota', quotas: { ...reading, codex: { error: '查询超时' } } } });
+  assert.equal(state.quotas.codex.error, '查询超时');
+  assert.deepEqual([0, 69, 70, 89, 90, 100].map(quotaLevel), ['ok', 'ok', 'warn', 'warn', 'danger', 'danger']);
+});
+
+test('reset times show the time today and the date otherwise; old readings say how old', () => {
+  const now = new Date(2026, 10, 15, 13, 0);
+  assert.equal(resetText(new Date(2026, 10, 15, 17, 59).toISOString(), now), '17:59 重置');
+  assert.equal(resetText(new Date(2026, 10, 21, 4, 59).toISOString(), now), '11/21 04:59 重置');
+  assert.equal(resetText(undefined, now), '');
+  assert.equal(ageText(new Date(2026, 10, 15, 12, 59, 50).toISOString(), now), '刚才');
+  assert.equal(ageText(new Date(2026, 10, 15, 12, 48).toISOString(), now), '12 分钟前');
+  assert.equal(ageText(new Date(2026, 10, 15, 10, 30).toISOString(), now), '2 小时前');
 });

@@ -1,4 +1,4 @@
-import type { BotStatus, ChatMessage, Choice, GroupInfo, PendingMessage, Selection, Snapshot } from './state.ts';
+import type { BotStatus, ChatMessage, Choice, GroupInfo, PendingMessage, Quotas, Selection, Snapshot } from './state.ts';
 
 /** A refusal from the backend. `code` is stable; `message` is ready to show. */
 export class ApiError extends Error {
@@ -22,8 +22,11 @@ const group = (id: string) => `/api/groups/${encodeURIComponent(id)}`;
 export const api = {
   status: () => call<{ bots: BotStatus[] }>('GET', '/api/status'),
   groups: () => call<{ groups: GroupInfo[] }>('GET', '/api/groups'),
+  quota: () => call<{ quotas: Quotas }>('GET', '/api/quota'),
+  refreshQuota: () => call<{ quotas: Quotas }>('POST', '/api/quota/refresh'),
   createGroup: (name: string) => call<{ group: GroupInfo }>('POST', '/api/groups', { name }),
-  snapshot: (id: string) => call<Snapshot & { group: GroupInfo }>('GET', group(id)),
+  snapshot: (id: string) => call<Snapshot & { group: GroupInfo; messageCount: number }>('GET', group(id)),
+  deleteGroup: (id: string) => call<{ group: GroupInfo }>('DELETE', group(id)),
   older: (id: string, before: number) => call<{ records: ChatMessage[]; hasMore: boolean }>('GET', `${group(id)}/records?before=${before}&limit=200`),
   send: (id: string, messageId: string, content: string) => call<{ queued: boolean }>('POST', `${group(id)}/messages`, { id: messageId, content }),
   remove: (id: string, messageId: string) => call<{ message: PendingMessage }>('DELETE', `${group(id)}/queue/${encodeURIComponent(messageId)}`),

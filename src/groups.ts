@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile } from 'node:fs/promises';
-import { replaceFile } from './files.ts';
+import { renameWithRetry, replaceFile } from './files.ts';
 import { join } from 'node:path';
 import { runCli } from './cli.ts';
 import { createCompactor } from './compact.ts';
@@ -31,6 +31,9 @@ export type AppEvent =
 
 export class GroupNotFoundError extends Error {
   constructor() { super('群不存在'); this.name = 'GroupNotFoundError'; }
+}
+export class GroupBusyError extends Error {
+  constructor() { super('这个群正在回答，等这一轮结束后再删'); this.name = 'GroupBusyError'; }
 }
 
 export type GroupsOptions = {
@@ -104,7 +107,7 @@ export class Groups {
       // A bot that is not on a subscription login stays in the group but never
       // starts its CLI: every message to it fails with the reason, in view.
       const run: Bot = status.enabled
-        ? input => limit(() => runCli({ provider: bot.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, model: input.model, effort: input.effort }, input.prompt!, input.stable))
+        ? input => limit(() => runCli({ provider: bot.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, model: input.model, effort: input.effort, defaultModel: status.models.defaultModel?.id }, input.prompt!, input.stable))
         : async () => { throw new Error(`${status.name} 未启用：${status.login.detail}。jixia 只走订阅登录；确认无误后可在 config.yaml 里把 requireSubscription 设为 false`); };
       return [status.name, run];
     }));
@@ -251,7 +254,41 @@ export class Groups {
       this.#compactors.set(id, compactor);
     }
     compactor(() => ({ history: scheduler.history, activeUserSeq: scheduler.round?.userSeq ?? null }))
-      .catch(error => this.#emit({ group: id, type: 'error', message: `压缩对话失败，继续使用旧摘要，下一轮结束后重试：${message(error)}` }));
+      .catch(error => {
+        // A group deleted mid-compaction has no folder left to write into; that is expected, not a failure.
+        if (this.#infos.has(id)) this.#emit({ group: id, type: 'error', message: `压缩对话失败，继续使用旧摘要，下一轮结束后重试：${message(error)}` });
+      });
+  }
+
+  /**
+   * Deletes a group: its folder moves to data/deleted/, from where it can be
+   * moved back by hand. Refused while the group is answering, since a running
+   * round cannot be cancelled. Memory it wrote stays: memory is shared.
+   */
+  async remove(id: string): Promise<GroupInfo> {
+    const info = this.info(id);
+    const scheduler = await this.#scheduler(id);
+    // In the scheduler's own order: either no round is running and none will
+    // start, or a round is running and nothing changes.
+    if (!(await scheduler.retire())) throw new GroupBusyError();
+    this.#infos.delete(id);
+    this.#schedulers.delete(id);
+    this.#compactors.delete(id);
+    const selection = this.#selections.get(id);
+    this.#selections.delete(id);
+    try {
+      const deleted = join(this.#options.root, 'data', 'deleted');
+      await mkdir(deleted, { recursive: true });
+      await renameWithRetry(join(this.#dir.groups, id), join(deleted, id), 8);
+    } catch (error) {
+      // The folder is still in place: put the group back. Its scheduler is
+      // retired, so the next use opens a fresh one from the journal.
+      this.#infos.set(id, info);
+      if (selection) this.#selections.set(id, selection);
+      throw new Error(`无法移动群文件夹，群没有删除：${message(error)}。可能有程序正开着里面的文件`);
+    }
+    this.#emit({ type: 'groups', groups: this.list() });
+    return info;
   }
 
   #drain(id: string, scheduler: Scheduler): void {
