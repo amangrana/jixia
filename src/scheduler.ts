@@ -21,10 +21,11 @@ export type ChatMessage = { seq: number; id: string; ts: string; from: string; t
 export type RoundInput = { message: PendingMessage; history: ChatMessage[] };
 export type BotReply = { reply: string; memoryRequests?: MemoryRequest[]; model?: string; effort?: string };
 // `model` and `effort` are what the group asks this bot to use; absent means the bot's own default.
-export type Bot = (input: RoundInput & { prompt?: string; model?: string; effort?: string }) => Promise<string | BotReply>;
+export type Bot = (input: RoundInput & { prompt?: string; stable?: string; model?: string; effort?: string }) => Promise<string | BotReply>;
 // Runs once per round before any bot starts and returns each target bot's
 // prompt, or the reason that bot must not be called this round.
-export type Prepare = (input: RoundInput) => Promise<Record<string, { prompt: string } | { error: string }>>;
+// `stable`, when given, is the leading part of `prompt` that rarely changes between rounds.
+export type Prepare = (input: RoundInput) => Promise<Record<string, { prompt: string; stable?: string } | { error: string }>>;
 export type RoundState = { messageId: string; userSeq: number; pending: string[] };
 // What a UI needs to stay current. Emitted only after the change is on disk.
 export type SchedulerEvent =
@@ -280,7 +281,7 @@ export class Scheduler {
           const entry = prepared?.[bot];
           if (this.#prepare && !entry) throw new Error('没有为该 bot 准备上下文');
           if (entry && 'error' in entry) throw new Error(entry.error);
-          const output = await this.#bots[bot]({ ...structuredClone(input), ...(entry ? { prompt: entry.prompt } : {}) });
+          const output = await this.#bots[bot]({ ...structuredClone(input), ...(entry ? { prompt: entry.prompt, ...(entry.stable === undefined ? {} : { stable: entry.stable }) } : {}) });
           const reply = typeof output === 'string' ? output : output?.reply;
           if (typeof reply !== 'string') throw new Error('Bot returned non-text output');
           content = reply;

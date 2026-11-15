@@ -24,7 +24,7 @@ await writeFile(readable, marker, 'utf8');
 const forbidden = name => join(data, `written-by-${name}.txt`);
 const providers = { claude: 'claude', chatgpt: 'codex' };
 const bots = Object.fromEntries(Object.entries(providers).map(([name, provider]) =>
-  [name, input => runCli({ provider, workDir, readDir: root, timeoutMs: 180000 }, input.prompt)]));
+  [name, input => runCli({ provider, workDir, readDir: root, timeoutMs: 180000 }, input.prompt, input.stable)]));
 const memory = { commonPath: join(data, 'common.md'), selfPath: bot => join(data, `${bot}.md`), defaultWriter: 'claude' };
 const prepare = createPreparer({
   systemPath: join(root, 'prompts', 'system.md'), commonPath: join(data, 'common.md'),

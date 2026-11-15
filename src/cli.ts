@@ -97,8 +97,23 @@ export function validateOutput(data: unknown): BotOutput {
   return output as BotOutput;
 }
 
-/** `files` are the per-call temp paths Codex needs; Claude takes the schema inline. */
-export function buildArgs(config: CliConfig, files: { schema: string; final: string }): string[] {
+/**
+ * Where each part of the prompt goes. Claude Code's prompt cache reuses whole
+ * blocks only, and everything on stdin is one block: a prompt that differs in
+ * its last line is written to the cache again in full and never read back.
+ * The system prompt is a block of its own, so the part that rarely changes
+ * goes there and is read from the cache while it stays the same. Measured in
+ * "实现前的实测" of the design doc.
+ *
+ * Codex gets everything on stdin: no placement made its cache hit reliably.
+ */
+export function splitPrompt(provider: Provider, prompt: string, stable: string | undefined): { system?: string; stdin: string } {
+  if (provider !== 'claude' || !stable || !prompt.startsWith(stable + '\n')) return { stdin: prompt };
+  return { system: stable, stdin: prompt.slice(stable.length + 1) };
+}
+
+/** `files` are the per-call temp paths: Codex's schema and answer, and for Claude the system prompt file when there is one. */
+export function buildArgs(config: CliConfig, files: { schema: string; final: string; system?: string }): string[] {
   if (config.provider === 'claude') {
     return [
       '-p',
@@ -109,6 +124,9 @@ export function buildArgs(config: CliConfig, files: { schema: string; final: str
       '--settings', JSON.stringify({ claudeMdExcludes: ['**'], autoMemoryEnabled: false, disableAllHooks: true }),
       ...(config.model ? ['--model', config.model] : []),
       ...(config.effort ? ['--effort', config.effort] : []),
+      // A file, not an argument: memory and a summary would exceed the Windows command line limit.
+      // Appended, so Claude Code's own system prompt stays as it is.
+      ...(files.system ? ['--append-system-prompt-file', files.system] : []),
       '--output-format', 'json',
       '--json-schema', JSON.stringify(OUTPUT_SCHEMA),
     ];
@@ -224,15 +242,20 @@ export function parseOutput(provider: Provider, stdout: string, final: string | 
 const NAME: Record<Provider, string> = { claude: 'Claude Code', codex: 'Codex' };
 const tail = (text: string) => text.trim().slice(-2000);
 
-/** One fresh headless call: full prompt in, validated reply and memory requests out. Throws CliError on any failure. */
-export async function runCli(config: CliConfig, prompt: string): Promise<BotOutput> {
+/**
+ * One fresh headless call: full prompt in, validated reply and memory requests out. Throws CliError on any failure.
+ * `stable` is the leading part of `prompt` that rarely changes between calls; see splitPrompt.
+ */
+export async function runCli(config: CliConfig, prompt: string, stable?: string): Promise<BotOutput> {
   const scratch = await mkdtemp(join(tmpdir(), 'jixia-cli-'));
   try {
-    const files = { schema: join(scratch, 'schema.json'), final: join(scratch, 'final.json') };
+    const { system, stdin } = splitPrompt(config.provider, prompt, stable);
+    const files = { schema: join(scratch, 'schema.json'), final: join(scratch, 'final.json'), ...(system === undefined ? {} : { system: join(scratch, 'system.md') }) };
     if (config.provider === 'codex') await writeFile(files.schema, JSON.stringify(OUTPUT_SCHEMA), 'utf8');
+    if (system !== undefined) await writeFile(files.system!, system, 'utf8');
     const result = await runProcess(config.executable ?? config.provider, buildArgs(config, files), {
       cwd: config.workDir,
-      input: prompt.endsWith('\n') ? prompt : prompt + '\n',
+      input: stdin.endsWith('\n') ? stdin : stdin + '\n',
       timeoutMs: config.timeoutMs,
       env: subscriptionEnv(config.env),
     });

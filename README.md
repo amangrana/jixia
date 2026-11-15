@@ -156,6 +156,12 @@ node tests/cli-live.mjs
 
 `src/context.ts` 的 `createPreparer(sources)` 生成调度器用的 `prepare`：每轮把通用指令、公共记忆、各自记忆、摘要读一次，为每个目标 bot 拼好 prompt。各段带标题，顺序固定：通用指令、公共记忆、你的各自记忆、对话摘要、摘要之后的原文、当前用户消息。原文每条消息一行 JSON；“当前用户消息”一段标明本轮可以写公共记忆的 bot。
 
+前四段是稳定部分，`prepare` 把它单独交给 bot（`stable`）。对 Claude Code，`runCli` 把这部分写进临时文件、用 `--append-system-prompt-file` 传入，其余走 stdin，这样稳定部分没变时下一轮能从 prompt cache 读取；全部走 stdin 时读不到，因为缓存只复用完全相同的整块内容。Codex 怎么放都读不到缓存，所以仍全部走 stdin。确认缓存命中的真实检查，3 个小模型请求：
+
+```powershell
+node tests/cache-live.mjs
+```
+
 - 通用指令在 `prompts/system.md`，其中 `{{self}}`、`{{members}}`、`{{records}}` 在拼装时替换。
 - 摘要文件以 `---`、`coveredThroughSeq: N`、`---` 三行开头；没有这个文件头时整轮记为失败，不猜测边界。记忆和摘要文件不存在时按空处理。
 - 通用指令、公共记忆、摘要读取出错时，本轮所有 bot 记为失败；某个 bot 的各自记忆读取出错时，只有它失败，其他 bot 照常回答。

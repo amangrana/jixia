@@ -40,7 +40,7 @@ const history = lines.map(([from, content], index) => {
 });
 const { compact } = DEFAULT_CONFIG;
 const summaryPath = join(root, 'summary.md');
-const cli = (provider, extra = {}) => prompt => runCli({ provider, workDir: work, readDir: root, timeoutMs: 180000, ...extra }, prompt);
+const cli = (provider, extra = {}) => (prompt, stable) => runCli({ provider, workDir: work, readDir: root, timeoutMs: 180000, ...extra }, prompt, stable);
 let failed = false;
 try {
   // Thirteen rounds; keeping three means rounds 1-10 (seq 1-20) are compressed.
@@ -61,7 +61,7 @@ try {
     summaryPath, recordsPath: join(root, 'records.jsonl'), bots: ['claude', 'chatgpt'], defaultWriter: 'claude',
   });
   const prompts = await prepare({ message: { id: 'q', content: question.content, targets: ['claude', 'chatgpt'] }, history: [...history, question] });
-  const [claude, chatgpt] = await Promise.all([cli('claude')(prompts.claude.prompt), cli('codex')(prompts.chatgpt.prompt)]);
+  const [claude, chatgpt] = await Promise.all([cli('claude')(prompts.claude.prompt, prompts.claude.stable), cli('codex')(prompts.chatgpt.prompt, prompts.chatgpt.stable)]);
   for (const [name, output] of [['claude', claude], ['chatgpt', chatgpt]]) console.log(`--- ${name} ---\n${output.reply}`);
   const knows = reply => reply.includes('CYAN') && reply.includes('43128') && reply.includes('37500') && reply.includes('const retries = 2;') && !/并发上限(是|为)\s*8/.test(reply);
   const checks = {

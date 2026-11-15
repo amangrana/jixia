@@ -104,7 +104,7 @@ export class Groups {
       // A bot that is not on a subscription login stays in the group but never
       // starts its CLI: every message to it fails with the reason, in view.
       const run: Bot = status.enabled
-        ? input => limit(() => runCli({ provider: bot.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, model: input.model, effort: input.effort }, input.prompt!))
+        ? input => limit(() => runCli({ provider: bot.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, model: input.model, effort: input.effort }, input.prompt!, input.stable))
         : async () => { throw new Error(`${status.name} 未启用：${status.login.detail}。jixia 只走订阅登录；确认无误后可在 config.yaml 里把 requireSubscription 设为 false`); };
       return [status.name, run];
     }));

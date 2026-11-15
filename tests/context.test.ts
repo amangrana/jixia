@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assemblePrompt, createPreparer, estimateTokens, parseSummary } from '../src/context.ts';
+import { assembleParts, assemblePrompt, createPreparer, estimateTokens, parseSummary } from '../src/context.ts';
 import { designatedWriter } from '../src/routing.ts';
 import { Scheduler } from '../src/scheduler.ts';
 import type { ChatMessage } from '../src/scheduler.ts';
@@ -63,14 +63,32 @@ async function workspace(t: { after: (fn: () => Promise<void>) => void }) {
   return { directory, sources };
 }
 
+test('the prompt splits into a stable part (instructions, memory, summary) and a changing part (recent messages, current message)', () => {
+  const parts = {
+    system: '你是 {{self}}', bot: 'claude', bots: ['claude'], recordsPath: 'r',
+    common: '公共', self: '私有', summary: { coveredThroughSeq: 1, body: '摘要正文' },
+    history: [msg(1, 'user', '旧'), msg(2, 'claude', '新一些')], message: msg(3, 'user', '当前问题'), writer: 'claude',
+  };
+  const { stable, changing } = assembleParts(parts);
+  assert.deepEqual([...stable.matchAll(/^# (.+)$/gm)].map(match => match[1]), ['通用指令', '公共记忆', '你的各自记忆', '对话摘要']);
+  assert.deepEqual([...changing.matchAll(/^# (.+)$/gm)].map(match => match[1]), ['摘要之后的原文', '当前用户消息']);
+  assert(stable.includes('摘要正文') && !stable.includes('当前问题') && !stable.includes('新一些'));
+  // Joined, the two parts are exactly the prompt sent as one text, so the bot sees the same content either way.
+  assert.equal(assemblePrompt(parts), `${stable}\n${changing}`);
+  // A new round with the same memory and summary leaves the stable part unchanged.
+  assert.equal(assembleParts({ ...parts, history: [...parts.history, msg(3, 'user', '当前问题')], message: msg(4, 'user', '下一个') }).stable, stable);
+});
+
 test('one round: every bot gets its own prompt built from the same snapshot before any bot starts', async t => {
   const { directory, sources } = await workspace(t);
   await writeFile(join(directory, 'common.md'), '公共内容-一');
   await writeFile(join(directory, 'chatgpt.md'), 'chatgpt 的私有内容');
   const prompts: Record<string, string[]> = { claude: [], chatgpt: [] };
-  const bot = (name: string) => async (input: { prompt?: string }) => {
+  const bot = (name: string) => async (input: { prompt?: string; stable?: string }) => {
     // A change after the round started must not reach a bot in the same round.
     await writeFile(join(directory, 'common.md'), '公共内容-二');
+    // The stable part reaches the bot and is exactly the start of its prompt.
+    assert(input.stable && input.prompt!.startsWith(input.stable + '\n') && input.stable.includes('# 对话摘要') && !input.stable.includes('# 当前用户消息'));
     prompts[name].push(input.prompt!);
     return `${name} 的回答`;
   };

@@ -90,11 +90,11 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 - 子文件夹名用 app 生成的 ID，不用群名，防止 path traversal。
 - 改写文件时先写临时文件再改名，写到一半崩了也不会损坏。
 
-**CLI 的权限：能读，不能写。** 硬性限制：Codex 用 read-only sandbox；Claude Code 只开放 Read 工具，并禁用 MCP。两家的读取范围不同：Claude Code 只能读显式授权的目录，第一版授权整个 jixia 文件夹；Codex 能读工作目录以外的文件。两个 bot 因此都能读到另一个 bot 的私有记忆，第一版自用可以接受。prompt 约束：只参与讨论；只在你要求时读取文件。prompt 一律通过 stdin 传入，因为带记忆和历史的 prompt 一定超过 Windows 命令行长度限制。
+**CLI 的权限：能读，不能写。** 硬性限制：Codex 用 read-only sandbox；Claude Code 只开放 Read 工具，并禁用 MCP。两家的读取范围不同：Claude Code 只能读显式授权的目录，第一版授权整个 jixia 文件夹；Codex 能读工作目录以外的文件。两个 bot 因此都能读到另一个 bot 的私有记忆，第一版自用可以接受。prompt 约束：只参与讨论；只在你要求时读取文件。prompt 不放在命令行参数里，因为带记忆和历史的 prompt 一定超过 Windows 命令行长度限制：Codex 全部通过 stdin 传入；Claude Code 的稳定部分写进临时文件、作为追加的系统提示传入，其余通过 stdin（原因见“上下文拼装与压缩”）。
 
 实测确定的调用方式（依据见 `jixia CLI 实测记录.md`）：
 
-- **Claude Code：** `claude -p --tools Read --allowedTools Read --add-dir <jixia 文件夹> --strict-mcp-config --permission-mode dontAsk --no-session-persistence --output-format json`，加 `--setting-sources ""` 和 `--settings '{"claudeMdExcludes":["**"],"autoMemoryEnabled":false,"disableAllHooks":true}'` 隔离本机配置。回答取 JSON 外层的 `structured_output`。不用 `--bare`，它不读订阅登录。
+- **Claude Code：** `claude -p --tools Read --allowedTools Read --add-dir <jixia 文件夹> --strict-mcp-config --permission-mode dontAsk --no-session-persistence --output-format json`，加 `--setting-sources ""` 和 `--settings '{"claudeMdExcludes":["**"],"autoMemoryEnabled":false,"disableAllHooks":true}'` 隔离本机配置；上下文的稳定部分用 `--append-system-prompt-file <临时文件>` 传入，不替换 CLI 自带的系统提示。回答取 JSON 外层的 `structured_output`。不用 `--bare`，它不读订阅登录。
 - **Codex：** `codex exec --ignore-user-config -c 'windows.sandbox="elevated"' -c project_doc_max_bytes=0 --skip-git-repo-check --sandbox read-only --cd <空工作目录> -`。`--ignore-user-config` 之后必须补回 Windows 沙箱设置，否则读写都被拦。回答用 `--output-last-message` 取，不解析终端输出。
 - **模型和 effort：** Claude Code 用 `--model <名称>` 和 `--effort <档位>`；Codex 用 `--model <名称>` 和 `-c model_reasoning_effort="<档位>"`。选“默认”时不传对应参数，由 CLI 决定。
 - **模型列表：** Codex 用 `codex debug models`，输出 JSON，标为隐藏的模型不列出。Claude Code 用 `claude -p --input-format stream-json --output-format stream-json --verbose` 启动后，从 stdin 发一条 `initialize` 控制请求，不发 prompt，从响应的 `models` 字段读取。这两种方式都不是 CLI 的正式功能，升级后可能变化，所以查询失败必须有退路。
@@ -164,6 +164,8 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 4. 对话摘要（compact 之后的旧记录）
 5. 摘要之后的全部原文（至少最近 3 轮）
 6. 你的新消息
+
+**怎么传给 CLI：** 前四段是稳定部分，只在写入记忆或压缩后变化；后两段每轮都变。prompt cache 只复用完全相同的整块内容，而 stdin 传入的内容是一整块，末尾一变整块都对不上。所以 Claude Code 的稳定部分作为追加的系统提示单独传入，只要它没变，下一轮就能从缓存读取；后两段仍走 stdin，每轮重新计算。Codex 在每次全新调用的方式下，我们的内容怎么放都读不到缓存，所以全部走 stdin。两种传法下 bot 看到的内容和顺序相同。
 
 **Compact 流程：**
 
@@ -262,7 +264,7 @@ bot 的回答另带 `model`，指定了 effort 时还有 `effort`；这两个字
 - [x] 结构化输出（Claude 的 `--json-schema`、Codex 的 `--output-schema`）可用，采用它分离回答和写记忆请求
 - [x] 订阅下能选哪些模型：改为启动时向 CLI 查询，两种查询方式都已跑通，不消耗额度。逐个模型在订阅下是否可用没有测，只实际调用过 Claude 的 `sonnet` 和 Codex 的 `gpt-5.6-luna`
 - [x] Codex 的 effort 参数：`-c model_reasoning_effort="low"` 调用成功；填不存在的档位时服务端报错，说明参数确实传到了请求里
-- [x] 每轮开销和缓存（`tests/usage-live.mjs`，小模型实测）：只发 5 个 token 的 prompt 时，Claude Code 报告输入约 8700 token，Codex 约 14000 token，这是 CLI 自带内容的开销，每次调用都有。Claude Code 自带的这部分在独立进程之间能命中缓存；我们拼的 prompt 两次调用前缀相同，但第二次没有读到缓存。Codex 的缓存时有时无。两个 CLI 都只报告 token 数，不报告订阅额度用了多少，所以“每轮消耗多少额度”无法测得
+- [x] 每轮开销和缓存（`tests/usage-live.mjs`，小模型实测）：只发 5 个 token 的 prompt 时，Claude Code 报告输入约 8700 token，Codex 约 14000 token，这是 CLI 自带内容的开销，每次调用都有。Claude Code 自带的这部分在独立进程之间能命中缓存；我们拼的 prompt 全部走 stdin 时，两次调用前缀相同，第二次也读不到缓存，因为缓存只复用完全相同的整块内容。改为把稳定部分作为追加的系统提示传入后，下一轮能读到（`tests/cache-live.mjs`：第一轮读 1924、写 8528，之后两轮读 9753、写约 750）。Codex 在每次全新调用的方式下，我们的内容始终读不到缓存，试过固定缓存键、改放到指令文件、精简自带内容，都没有用；它自带的部分也只是时有时无地命中。精简 Codex 的配置能把自带开销从约 14000 降到约 5700 token，但要替换它的基础指令、关掉部分功能，有改变行为的风险，没有采用。两个 CLI 都只报告 token 数，不报告订阅额度用了多少，所以“每轮消耗多少额度”无法测得
 
 ## 风险与待定问题
 

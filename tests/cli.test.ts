@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildArgs, CliError, parseOutput, runProcess, subscriptionEnv, usedModel, validateOutput } from '../src/cli.ts';
+import { buildArgs, CliError, parseOutput, runProcess, splitPrompt, subscriptionEnv, usedModel, validateOutput } from '../src/cli.ts';
 import type { CliConfig } from '../src/cli.ts';
 
 // None of these call a model. The live check is tests/cli-live.mjs.
@@ -74,6 +74,21 @@ test('the model that answered comes from what Claude Code reports; Codex falls b
   assert.equal(usedModel('claude', 'not json', undefined), '默认模型');
   assert.equal(usedModel('codex', stdout, 'gpt-x'), 'gpt-x');
   assert.equal(usedModel('codex', '', undefined), '默认模型');
+});
+
+test('the stable part goes to Claude Code as a system prompt file; Codex and anything unexpected get it all on stdin', () => {
+  const stable = '# 通用指令\n规则\n', prompt = `${stable}\n# 当前用户消息\n问题\n`;
+  assert.deepEqual(splitPrompt('claude', prompt, stable), { system: stable, stdin: '# 当前用户消息\n问题\n' });
+  assert.deepEqual(splitPrompt('codex', prompt, stable), { stdin: prompt });
+  assert.deepEqual(splitPrompt('claude', prompt, undefined), { stdin: prompt });
+  // Not actually the start of the prompt: sending both would duplicate or drop text, so nothing is split.
+  assert.deepEqual(splitPrompt('claude', prompt, '# 别的内容\n'), { stdin: prompt });
+  const args = buildArgs(config('claude'), { ...files, system: 'SYS.md' });
+  assert.equal(args[args.indexOf('--append-system-prompt-file') + 1], 'SYS.md');
+  // The default system prompt is kept, never replaced.
+  assert(!args.includes('--system-prompt') && !args.includes('--system-prompt-file'));
+  assert(!buildArgs(config('claude'), files).includes('--append-system-prompt-file'));
+  assert(!buildArgs(config('codex'), { ...files, system: 'SYS.md' }).includes('SYS.md'));
 });
 
 test('billing overrides are removed from the child environment only', () => {
