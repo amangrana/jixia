@@ -65,6 +65,10 @@ test('config: defaults without a file, overrides merge, and mistakes are rejecte
   assert.throws(() => resolveConfig({ bots: { claude: { provider: 'claude', model: 'son net' } } }), /model 必须是/);
   assert.throws(() => resolveConfig({ bots: { chatgpt: { provider: 'codex' } } }), /defaultWriter/);
   assert.throws(() => resolveConfig({ requireSubscription: 'no' }), /requireSubscription/);
+  assert.equal(resolveConfig({ keepCliSessions: true }).keepCliSessions, true);
+  assert.throws(() => resolveConfig({ keepCliSessions: 'yes' }), /keepCliSessions/);
+  assert.equal(resolveConfig({ webSearch: true }).webSearch, true);
+  assert.throws(() => resolveConfig({ webSearch: 1 }), /webSearch/);
   assert.deepEqual(resolveConfig({ compact: { keepRounds: 5 } }).compact, { ...DEFAULT_CONFIG.compact, keepRounds: 5 });
   // Claude's default model and effort do not follow a switch to Codex.
   assert.deepEqual(resolveConfig({ compact: { provider: 'codex' } }).compact, { provider: 'codex', thresholdTokens: 40_000, keepRounds: 3, maxSummaryTokens: 4_000 });

@@ -378,3 +378,42 @@ test('model changes to one group run one after another: none is lost, and memory
   assert.equal((await app.api('PUT', `/api/groups/${id}/models/claude`, { effort: 'low' })).status, 400);
   assert.deepEqual((await app.api('PUT', `/api/groups/${id}/models/claude`, {})).body.selection.claude, { model: 'haiku' });
 });
+
+test('search and session switches belong to each group: new groups start from config, queued messages follow a change, and they survive a restart', async t => {
+  const seen: string[] = [];
+  const gate = deferred<void>(), started = deferred<void>();
+  const claude: Bot = async input => {
+    if (input.message.id === 'slow') { started.resolve(); await gate.promise; }
+    seen.push(`${input.message.id}:search=${input.webSearch}:keep=${input.keepSessions}`);
+    return 'ok';
+  };
+  const config = { bots: { claude: { provider: 'claude' } } };
+  const app = await start(t, { bots: { claude }, config });
+  const a = await app.newGroup('甲'), b = await app.newGroup('乙');
+  assert.deepEqual((await app.api('GET', `/api/groups/${a}`)).body.switches, { webSearch: false, keepSessions: false });
+
+  await app.api('POST', `/api/groups/${a}/messages`, { id: 'slow', content: '第一条' });
+  await started.promise;
+  await app.api('POST', `/api/groups/${a}/messages`, { id: 'queued', content: '排队的' });
+  // Only the field sent changes.
+  const on = await app.api('PUT', `/api/groups/${a}/switches`, { webSearch: true });
+  assert.deepEqual([on.status, on.body.switches], [200, { webSearch: true, keepSessions: false }]);
+  assert.deepEqual((await app.api('PUT', `/api/groups/${a}/switches`, { keepSessions: true })).body.switches, { webSearch: true, keepSessions: true });
+  assert(app.events.some(e => e.group === a && e.type === 'switches' && e.switches.keepSessions));
+  gate.resolve();
+  await app.api('POST', `/api/groups/${b}/messages`, { id: 'other', content: '另一个群' });
+  await until(() => seen.length === 3, 'three rounds');
+  // The running round keeps what it started with; the queued one gets the change; the other group is untouched.
+  assert.deepEqual([...seen].sort(), ['other:search=false:keep=false', 'queued:search=true:keep=true', 'slow:search=false:keep=false']);
+  assert.equal((await app.api('PUT', `/api/groups/${a}/switches`, { webSearch: 'yes' })).status, 400);
+  // Changing the switches leaves the model choice alone, and the other way round.
+  await app.api('PUT', `/api/groups/${a}/models/claude`, { model: null });
+  assert.deepEqual((await app.api('GET', `/api/groups/${a}`)).body.switches, { webSearch: true, keepSessions: true });
+
+  await app.close();
+  // After a restart with search on by default: existing groups keep their own settings, new groups get the new default.
+  const again = await start(t, { root: app.root, bots: { claude }, config: { ...config, webSearch: true } });
+  assert.deepEqual((await again.api('GET', `/api/groups/${a}`)).body.switches, { webSearch: true, keepSessions: true });
+  assert.deepEqual((await again.api('GET', `/api/groups/${b}`)).body.switches, { webSearch: false, keepSessions: false });
+  assert.deepEqual((await again.api('GET', `/api/groups/${await again.newGroup('丙')}`)).body.switches, { webSearch: true, keepSessions: false });
+});

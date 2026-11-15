@@ -163,6 +163,8 @@ button:disabled { cursor: default; opacity: 0.5; }
 .pickers { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 24px 0; font-size: 13px; }
 .picker { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .picker-name { color: var(--muted); font-weight: 600; }
+.switches { display: inline-flex; gap: 12px; color: var(--muted); }
+.switches label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 .picker select { max-width: 180px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font-size: 13px; }
 
 /* Composer */

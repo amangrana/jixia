@@ -168,3 +168,13 @@ test('a reconnect that missed more than one page drops the older records instead
   racing = reducer(racing, { type: 'snapshot', id: 'b', snapshot: snapshot(range(56, 255), { hasMore: true }), seen });
   assert.deepEqual([groupState(racing, 'b').records[0].seq, groupState(racing, 'b').records.at(-1)!.seq, groupState(racing, 'b').records.length], [56, 256, 201]);
 });
+
+test('the group switches come with the snapshot and follow pushes; a stale snapshot does not undo a push', () => {
+  let state = reducer(initialState, { type: 'snapshot', id: 'a', snapshot: { ...snapshot([]), switches: { webSearch: false, keepSessions: false } }, seen: counters(initialState, 'a') });
+  assert.deepEqual(groupState(state, 'a').switches, { webSearch: false, keepSessions: false });
+  assert.equal(groupState(state, 'b').switches, null); // Not known until its snapshot arrives.
+  const seen = counters(state, 'a');
+  state = reducer(state, { type: 'event', event: { group: 'a', type: 'switches', switches: { webSearch: true, keepSessions: false } } });
+  state = reducer(state, { type: 'snapshot', id: 'a', snapshot: { ...snapshot([]), switches: { webSearch: false, keepSessions: false } }, seen });
+  assert.deepEqual(groupState(state, 'a').switches, { webSearch: true, keepSessions: false });
+});

@@ -23,6 +23,8 @@ maxMessageTokens: 30000   # 单条消息上限（估算），超过就不入队
 maxMemoryTokens: 8000     # 记忆文件超过这个大小时提示整理
 
 requireSubscription: true # 只在 CLI 是订阅登录时启用对应的 bot
+keepCliSessions: false    # 新建群时“保存会话”开关的初始值；每个群可以在界面上单独改
+webSearch: false          # 新建群时“联网搜索”开关的初始值；每个群可以在界面上单独改
 
 compact:                  # 对话过长时自动压缩成摘要；指令在 prompts/compact.md
   provider: claude        # 用哪个 CLI 做压缩：claude 或 codex

@@ -24,9 +24,12 @@ export type BotStatus = { name: string; provider: string; enabled: boolean; logi
 /** What one bot is asked to use in a group. A missing field means "let the CLI decide". */
 export type Choice = { model?: string; effort?: string };
 export type Selection = Record<string, Choice>;
+/** Per-group switches, both off unless turned on (config.yaml gives new groups their starting values). */
+export type Switches = { webSearch: boolean; keepSessions: boolean };
 export type AppEvent =
   | ({ group: string } & SchedulerEvent)
   | { group: string; type: 'selection'; selection: Selection }
+  | { group: string; type: 'switches'; switches: Switches }
   | { group: string; type: 'error'; message: string }
   | { type: 'groups'; groups: GroupInfo[] }
   | { type: 'memory'; name: string };
@@ -49,7 +52,7 @@ export type GroupsOptions = {
   /** Test seam: replaces the real CLI-backed bots. Compaction is then off unless `summarize` is given too. */
   bots?: Record<string, Bot>;
   /** Test seam: replaces the CLI call that writes a summary. */
-  summarize?: (prompt: string) => Promise<string>;
+  summarize?: (prompt: string, options?: { keepSession?: boolean }) => Promise<string>;
 };
 
 // Folder names are app-generated IDs, never group names, so a name cannot
@@ -86,10 +89,11 @@ export class Groups {
   #applyMemory;
   /** The memory files: bots' write requests and edits from the memory page share one lock. */
   readonly memory: Memory;
-  #summarize: ((prompt: string) => Promise<string>) | undefined;
+  #summarize: ((prompt: string, options?: { keepSession?: boolean }) => Promise<string>) | undefined;
   #compactors = new Map<string, ReturnType<typeof createCompactor>>();
   // What was saved for each group. A bot missing from it uses the config default.
   #selections = new Map<string, Selection>();
+  #switches = new Map<string, Switches>();
   // Per group, the last model change in flight; the next one waits for it.
   #selecting = new Map<string, Promise<unknown>>();
   #listeners = new Set<(event: AppEvent) => void>();
@@ -116,7 +120,7 @@ export class Groups {
       // A bot that is not on a subscription login stays in the group but never
       // starts its CLI: every message to it fails with the reason, in view.
       const run: Bot = status.enabled
-        ? input => limit(() => runCli({ provider: bot.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, model: input.model, effort: input.effort, defaultModel: status.models.defaultModel?.id, defaultEffort: defaultEffortFor(status.models, input.model) }, input.prompt!, input.stable))
+        ? input => limit(() => runCli({ provider: bot.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, keepSession: input.keepSessions, webSearch: input.webSearch, model: input.model, effort: input.effort, defaultModel: status.models.defaultModel?.id, defaultEffort: defaultEffortFor(status.models, input.model) }, input.prompt!, input.stable))
         : async () => { throw new Error(`${status.name} 未启用：${status.login.detail}。jixia 只走订阅登录；确认无误后可在 config.yaml 里把 requireSubscription 设为 false`); };
       return [status.name, run];
     }));
@@ -125,7 +129,7 @@ export class Groups {
     const { compact } = config;
     const allowed = !config.requireSubscription || this.#statuses.some(status => status.provider === compact.provider && status.login.kind === 'subscription');
     this.#summarize = options.summarize ?? (options.bots ? undefined : allowed
-      ? async prompt => (await limit(() => runCli({ provider: compact.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, model: compact.model, effort: compact.effort }, prompt))).reply
+      ? async (prompt, settings) => (await limit(() => runCli({ provider: compact.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, keepSession: settings?.keepSession, model: compact.model, effort: compact.effort }, prompt))).reply
       : async () => { throw new Error(`没有可用的 ${compact.provider} 订阅登录`); });
   }
 
@@ -139,7 +143,13 @@ export class Groups {
         groups.#infos.set(entry.name, { id: entry.name, name: String(info.name), createdAt: String(info.createdAt) });
       } catch { continue; /* A folder without a readable group.json is not a group. */ }
       // A group from before this setting existed, or with an unreadable file, uses the config defaults.
-      try { groups.#selections.set(entry.name, cleanSelection(JSON.parse(await readFile(join(groups.#dir.groups, entry.name, 'settings.json'), 'utf8')).models)); } catch { /* defaults */ }
+      // Settings from before a field existed, or an unreadable file, fall back to the config defaults.
+      try {
+        const settings = JSON.parse(await readFile(join(groups.#dir.groups, entry.name, 'settings.json'), 'utf8'));
+        groups.#selections.set(entry.name, cleanSelection(settings.models));
+        const switches = settings.switches;
+        if (switches && typeof switches.webSearch === 'boolean' && typeof switches.keepSessions === 'boolean') groups.#switches.set(entry.name, { webSearch: switches.webSearch, keepSessions: switches.keepSessions });
+      } catch { /* defaults */ }
     }
     // Open every group now: this closes rounds a restart interrupted and
     // resumes queued messages without waiting for the user to click the group.
@@ -172,7 +182,7 @@ export class Groups {
     this.#infos.set(info.id, info);
     // A new group starts from the config defaults and keeps its own copy from
     // here on, so a later change to config.yaml does not move existing groups.
-    await this.#saveSelection(info.id, this.#defaults());
+    await this.#saveSettings(info.id, { selection: this.#defaults(), switches: this.#defaultSwitches() });
     await this.#scheduler(info.id);
     this.#emit({ type: 'groups', groups: this.list() });
     return info;
@@ -182,10 +192,54 @@ export class Groups {
     return Object.fromEntries(Object.entries(this.#options.config.bots).map(([name, bot]) => [name, { ...(bot.model ? { model: bot.model } : {}), ...(bot.effort ? { effort: bot.effort } : {}) }]));
   }
 
-  async #saveSelection(id: string, selection: Selection): Promise<void> {
-    const file = join(this.#dir.groups, id, 'settings.json');
-    await replaceFile(file, JSON.stringify({ models: selection }, null, 2));
+  #defaultSwitches(): Switches {
+    return { webSearch: this.#options.config.webSearch, keepSessions: this.#options.config.keepCliSessions };
+  }
+
+  // The group's settings file holds both its model choice and its switches;
+  // whatever is not being changed is written back as it is.
+  async #saveSettings(id: string, change: { selection?: Selection; switches?: Switches }): Promise<void> {
+    const selection = change.selection ?? this.selection(id), switches = change.switches ?? this.switches(id);
+    await replaceFile(join(this.#dir.groups, id, 'settings.json'), JSON.stringify({ models: selection, switches }, null, 2));
     this.#selections.set(id, selection);
+    this.#switches.set(id, switches);
+  }
+
+  // Changes to one group's settings run one at a time, each on top of the one before.
+  #inOrder<T>(id: string, action: () => Promise<T>): Promise<T> {
+    this.info(id);
+    const previous = this.#selecting.get(id) ?? Promise.resolve();
+    const result = previous.then(action);
+    const settled = result.catch(() => {});
+    this.#selecting.set(id, settled);
+    // Forget the chain once it is idle, so deleted groups leave nothing behind.
+    void settled.then(() => { if (this.#selecting.get(id) === settled) this.#selecting.delete(id); });
+    return result;
+  }
+
+  /** Whether this group's bots may search the web, and whether their calls are kept as CLI sessions. */
+  switches(id: string): Switches {
+    this.info(id);
+    return { ...(this.#switches.get(id) ?? this.#defaultSwitches()) };
+  }
+
+  /**
+   * Turns this group's switches on or off. Only the fields given change. Like
+   * the model choice, it applies to every round that starts afterwards,
+   * messages already queued included.
+   */
+  setSwitches(id: string, change: { webSearch?: unknown; keepSessions?: unknown }): Promise<Switches> {
+    return this.#inOrder(id, async () => {
+      const next = this.switches(id);
+      for (const key of ['webSearch', 'keepSessions'] as const) {
+        if (!(key in change)) continue;
+        if (typeof change[key] !== 'boolean') throw new RangeError(`${key} 必须是 true 或 false`);
+        next[key] = change[key] as boolean;
+      }
+      await this.#saveSettings(id, { switches: next });
+      this.#emit({ group: id, type: 'switches', switches: this.switches(id) });
+      return this.switches(id);
+    });
   }
 
   /** The model and effort each bot uses in this group right now. */
@@ -207,14 +261,7 @@ export class Groups {
    * one at a time, each on top of the one before.
    */
   select(id: string, bot: string, change: { model?: unknown; effort?: unknown }): Promise<Selection> {
-    this.info(id);
-    const previous = this.#selecting.get(id) ?? Promise.resolve();
-    const result = previous.then(() => this.#applySelection(id, bot, change));
-    const settled = result.catch(() => {});
-    this.#selecting.set(id, settled);
-    // Forget the chain once it is idle, so deleted groups leave nothing behind.
-    void settled.then(() => { if (this.#selecting.get(id) === settled) this.#selecting.delete(id); });
-    return result;
+    return this.#inOrder(id, () => this.#applySelection(id, bot, change));
   }
 
   async #applySelection(id: string, bot: string, change: { model?: unknown; effort?: unknown }): Promise<Selection> {
@@ -243,7 +290,7 @@ export class Groups {
         delete next.effort;
       }
     }
-    await this.#saveSelection(id, { ...this.selection(id), [bot]: next });
+    await this.#saveSettings(id, { selection: { ...this.selection(id), [bot]: next } });
     this.#emit({ group: id, type: 'selection', selection: this.selection(id) });
     return this.selection(id);
   }
@@ -253,7 +300,7 @@ export class Groups {
     const { root, config } = this.#options;
     // Each bot reads the group's choice when it is invoked, which is right
     // after the round's prompts are built: one choice per round, taken at its start.
-    const bots = Object.fromEntries(Object.entries(this.#bots).map(([name, run]): [string, Bot] => [name, input => run({ ...input, ...this.selection(id)[name] })]));
+    const bots = Object.fromEntries(Object.entries(this.#bots).map(([name, run]): [string, Bot] => [name, input => run({ ...input, ...this.selection(id)[name], ...this.switches(id) })]));
     const opening = Scheduler.open(directory, bots, {
       prepare: createPreparer({
         systemPath: join(root, 'prompts', 'system.md'),
@@ -279,14 +326,16 @@ export class Groups {
   // Never awaited by the round: answers show up first, the summary catches up.
   // A round that starts meanwhile uses the old summary plus more raw text.
   #compact(id: string, scheduler: Scheduler): void {
-    if (!this.#summarize || scheduler.needsReopen) return;
+    const summarize = this.#summarize;
+    if (!summarize || scheduler.needsReopen) return;
     let compactor = this.#compactors.get(id);
     if (!compactor) {
       const { root, config } = this.#options;
       compactor = createCompactor({
         summaryPath: join(this.#dir.groups, id, 'summary.md'), templatePath: join(root, 'prompts', 'compact.md'),
         settings: { thresholdTokens: config.compact.thresholdTokens, keepRounds: config.compact.keepRounds, maxSummaryTokens: config.compact.maxSummaryTokens, maxPromptTokens: config.maxPromptTokens },
-        run: this.#summarize,
+        // Compaction never searches; it keeps sessions when the group does.
+        run: prompt => summarize(prompt, { keepSession: this.switches(id).keepSessions }),
       });
       this.#compactors.set(id, compactor);
     }
@@ -313,6 +362,8 @@ export class Groups {
     this.#compactors.delete(id);
     const selection = this.#selections.get(id);
     this.#selections.delete(id);
+    const switches = this.#switches.get(id);
+    this.#switches.delete(id);
     try {
       const deleted = join(this.#options.root, 'data', 'deleted');
       await mkdir(deleted, { recursive: true });
@@ -322,6 +373,7 @@ export class Groups {
       // retired, so the next use opens a fresh one from the journal.
       this.#infos.set(id, info);
       if (selection) this.#selections.set(id, selection);
+      if (switches) this.#switches.set(id, switches);
       throw new Error(`无法移动群文件夹，群没有删除：${message(error)}。可能有程序正开着里面的文件`);
     }
     this.#emit({ type: 'groups', groups: this.list() });

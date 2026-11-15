@@ -109,11 +109,16 @@ export async function startServer(options: { groups: Groups; port: number; stati
       return { body: await groups.use(id, scheduler => {
         const history = scheduler.history;
         const records = history.slice(-pageSize(url.searchParams.get('limit')));
-        return { group, records, hasMore: records.length < history.length, messageCount: history.length, queue: scheduler.queue, round: scheduler.round, selection: groups.selection(id) };
+        return { group, records, hasMore: records.length < history.length, messageCount: history.length, queue: scheduler.queue, round: scheduler.round, selection: groups.selection(id), switches: groups.switches(id) };
       }) };
     }
     if (is('DELETE', 'api', 'groups', null)) {
       return { body: { group: await groups.remove(id) } };
+    }
+    if (is('PUT', 'api', 'groups', null, 'switches')) {
+      const body = await readJson(request);
+      const change = Object.fromEntries((['webSearch', 'keepSessions'] as const).filter(key => key in body).map(key => [key, body[key]]));
+      return { body: { switches: await groups.setSwitches(id, change) } };
     }
     if (is('PUT', 'api', 'groups', null, 'models', null)) {
       const body = await readJson(request);

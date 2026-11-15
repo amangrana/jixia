@@ -148,3 +148,27 @@ test('a missing executable is a spawn failure', async () => {
     (error: unknown) => error instanceof CliError && error.kind === 'spawn',
   );
 });
+
+test('sessions are not saved unless keepSession is on, for both CLIs', () => {
+  assert(buildArgs(config('claude'), files).includes('--no-session-persistence'));
+  assert(buildArgs(config('codex'), files).includes('--ephemeral'));
+  assert(!buildArgs(config('claude', { keepSession: true }), files).includes('--no-session-persistence'));
+  assert(!buildArgs(config('codex', { keepSession: true }), files).includes('--ephemeral'));
+  // Nothing else changes: the isolation and read-only settings stay.
+  const claude = buildArgs(config('claude', { keepSession: true }), files);
+  assert(claude.includes('--strict-mcp-config') && claude[claude.indexOf('--tools') + 1] === 'Read');
+  const codex = buildArgs(config('codex', { keepSession: true }), files);
+  assert(codex.includes('--ignore-user-config') && codex[codex.indexOf('--sandbox') + 1] === 'read-only');
+});
+
+test('web search is off unless switched on; switching it on adds lookups only, never writing', () => {
+  const after = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
+  const claudeOff = buildArgs(config('claude'), files), claudeOn = buildArgs(config('claude', { webSearch: true }), files);
+  assert.deepEqual([after(claudeOff, '--tools'), after(claudeOff, '--allowedTools')], ['Read', 'Read']);
+  assert.deepEqual([after(claudeOn, '--tools'), after(claudeOn, '--allowedTools')], ['Read,WebSearch,WebFetch', 'Read,WebSearch,WebFetch']);
+  assert(!/Write|Edit|Bash/.test(after(claudeOn, '--tools')));
+  // Codex is told either way, so its own default never decides; the sandbox stays read-only.
+  assert(buildArgs(config('codex'), files).includes('web_search="disabled"'));
+  const codexOn = buildArgs(config('codex', { webSearch: true }), files);
+  assert(codexOn.includes('web_search="live"') && after(codexOn, '--sandbox') === 'read-only');
+});

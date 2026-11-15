@@ -155,11 +155,13 @@ test('in a group: answers are not held up, later rounds get the summary plus onl
   const summaries: string[] = [];
   let release: (() => void) | undefined;
   let fail = true, hold = true;
+  const keeps: unknown[] = [];
   const groups = await Groups.open({
     root, logins: {},
     config: resolveConfig({ bots: { claude: { provider: 'claude' } }, compact: { thresholdTokens: 200, keepRounds: 1, maxSummaryTokens: 150 } }),
     bots: { claude: async input => { prompts.push(input.prompt!); return '回答'.repeat(15); } },
-    summarize: async prompt => {
+    summarize: async (prompt, options) => {
+      keeps.push(options?.keepSession);
       summaries.push(prompt);
       if (fail) throw new Error('额度用完');
       if (hold) await new Promise<void>(resolve => { release = resolve; });
@@ -169,6 +171,8 @@ test('in a group: answers are not held up, later rounds get the summary plus onl
   const events: AppEvent[] = [];
   groups.subscribe(event => events.push(event));
   const { id } = await groups.create('压缩');
+  // Compaction follows the group's session switch; it is never given search.
+  await groups.setSwitches(id, { keepSessions: true, webSearch: true });
   const summaryPath = join(root, 'data', 'groups', id, 'summary.md');
   const send = async (messageId: string, content: string) => {
     await groups.use(id, scheduler => scheduler.enqueue({ id: messageId, content }));
@@ -201,4 +205,5 @@ test('in a group: answers are not held up, later rounds get the summary plus onl
   // The journal and the readable records still hold everything.
   assert((await readFile(join(root, 'data', 'groups', id, 'records.jsonl'), 'utf8')).includes('暗号是 KIWI'));
   assert((await groups.use(id, scheduler => scheduler.history))[0].content.includes('暗号是 KIWI'));
+  assert(keeps.length >= 2 && keeps.every(keep => keep === true), JSON.stringify(keeps));
 });

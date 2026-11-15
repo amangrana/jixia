@@ -48,6 +48,10 @@ export type CliConfig = {
   defaultModel?: string;
   /** The effort the CLI uses when given none, as the startup query reported it for this model; recorded, never passed. */
   defaultEffort?: string;
+  /** Let the CLI save this call as one of its sessions (config: keepCliSessions). Off by default: nothing is left behind. */
+  keepSession?: boolean;
+  /** Let the model search the web (config: webSearch). Off by default; reading stays read-only either way. */
+  webSearch?: boolean;
   env?: NodeJS.ProcessEnv;
 };
 
@@ -117,13 +121,17 @@ export function splitPrompt(provider: Provider, prompt: string, stable: string |
   return { system: stable, stdin: prompt.slice(stable.length + 1) };
 }
 
+// Read only, plus web search and page fetching when switched on. Never anything that writes or runs commands.
+const claudeTools = (config: CliConfig) => config.webSearch ? 'Read,WebSearch,WebFetch' : 'Read';
+
 /** `files` are the per-call temp paths: Codex's schema and answer, and for Claude the system prompt file when there is one. */
 export function buildArgs(config: CliConfig, files: { schema: string; final: string; system?: string }): string[] {
   if (config.provider === 'claude') {
     return [
       '-p',
-      '--tools', 'Read', '--allowedTools', 'Read', '--add-dir', config.readDir,
-      '--strict-mcp-config', '--permission-mode', 'dontAsk', '--no-session-persistence',
+      '--tools', claudeTools(config), '--allowedTools', claudeTools(config), '--add-dir', config.readDir,
+      '--strict-mcp-config', '--permission-mode', 'dontAsk',
+      ...(config.keepSession ? [] : ['--no-session-persistence']),
       // Passed as an argument array, so the empty string survives; a shell would drop it.
       '--setting-sources', '',
       '--settings', JSON.stringify({ claudeMdExcludes: ['**'], autoMemoryEnabled: false, disableAllHooks: true }),
@@ -142,7 +150,10 @@ export function buildArgs(config: CliConfig, files: { schema: string; final: str
     // --ignore-user-config drops the Windows sandbox setting; without it every command is blocked.
     ...(process.platform === 'win32' ? ['-c', 'windows.sandbox="elevated"'] : []),
     '-c', 'project_doc_max_bytes=0',
-    '--skip-git-repo-check', '--sandbox', 'read-only', '--ephemeral',
+    '--skip-git-repo-check', '--sandbox', 'read-only',
+    ...(config.keepSession ? [] : ['--ephemeral']),
+    // Said either way: without it the CLI's own default would decide.
+    '-c', `web_search="${config.webSearch ? 'live' : 'disabled'}"`,
     ...(config.model ? ['--model', config.model] : []),
     // The value is TOML; callers only pass plain tokens (see MODEL_TOKEN), so quoting it is enough.
     ...(config.effort ? ['-c', `model_reasoning_effort="${config.effort}"`] : []),

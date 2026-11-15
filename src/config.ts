@@ -19,6 +19,8 @@ export type Config = {
   maxMessageTokens: number;
   maxMemoryTokens: number;
   requireSubscription: boolean;
+  keepCliSessions: boolean;
+  webSearch: boolean;
 };
 
 export const DEFAULT_CONFIG: Config = {
@@ -31,6 +33,8 @@ export const DEFAULT_CONFIG: Config = {
   maxMessageTokens: 30_000,
   maxMemoryTokens: 8_000,
   requireSubscription: true,
+  keepCliSessions: false,
+  webSearch: false,
   compact: { provider: 'claude', model: 'sonnet', effort: 'low', thresholdTokens: 40_000, keepRounds: 3, maxSummaryTokens: 4_000 },
 };
 
@@ -51,6 +55,8 @@ export function resolveConfig(raw: unknown): Config {
   }
   if (config.port > 65535) throw new Error('config.yaml：port 超出范围');
   if (typeof config.requireSubscription !== 'boolean') throw new Error('config.yaml：requireSubscription 必须是 true 或 false');
+  if (typeof config.keepCliSessions !== 'boolean') throw new Error('config.yaml：keepCliSessions 必须是 true 或 false');
+  if (typeof config.webSearch !== 'boolean') throw new Error('config.yaml：webSearch 必须是 true 或 false');
   if (typeof config.bots !== 'object' || config.bots === null || Array.isArray(config.bots) || !Object.keys(config.bots).length) throw new Error('config.yaml：bots 至少要有一个 bot');
   for (const [name, bot] of Object.entries(config.bots)) {
     if (!BOT_NAME.test(name) || RESERVED.has(name)) throw new Error(`config.yaml：bot 名字“${name}”不可用，只能用小写字母、数字、下划线和连字符，且不能是 all、user、system、common`);

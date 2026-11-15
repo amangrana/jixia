@@ -12,6 +12,7 @@ export type BotStatus = { name: string; provider: string; enabled: boolean; logi
 export type Choice = { model?: string; effort?: string };
 export type Selection = Record<string, Choice>;
 /** A change to one bot's choice: only the fields given change; null goes back to the CLI default. */
+export type Switches = { webSearch: boolean; keepSessions: boolean };
 export type ChoiceChange = { model?: string | null; effort?: string | null };
 
 export type MemoryFile = { name: string; content: string; version: string; tokens: number; limit: number };
@@ -24,6 +25,7 @@ export type ServerEvent =
   | { group: string; type: 'queue'; queue: PendingMessage[] }
   | { group: string; type: 'round'; round: RoundState | null }
   | { group: string; type: 'selection'; selection: Selection }
+  | { group: string; type: 'switches'; switches: Switches }
   | { group: string; type: 'error'; message: string }
   | { type: 'groups'; groups: GroupInfo[] }
   | { type: 'quota'; quotas: Quotas }
@@ -43,6 +45,9 @@ export type GroupState = {
   roundEvents: number;
   selection: Selection;
   selectionEvents: number;
+  /** Null until the first snapshot says. */
+  switches: Switches | null;
+  switchesEvents: number;
 };
 
 export type State = {
@@ -58,7 +63,7 @@ export type State = {
   memoryChanges: Record<string, number>;
 };
 
-export type Snapshot = { records: ChatMessage[]; hasMore: boolean; queue: PendingMessage[]; round: RoundState | null; selection?: Selection };
+export type Snapshot = { records: ChatMessage[]; hasMore: boolean; queue: PendingMessage[]; round: RoundState | null; selection?: Selection; switches?: Switches };
 export type Action =
   | { type: 'connection'; connected: boolean }
   | { type: 'groups'; groups: GroupInfo[] }
@@ -66,15 +71,15 @@ export type Action =
   | { type: 'quotas'; quotas: Quotas }
   | { type: 'select'; id: string | null }
   /** `seen` is counters(state, id) taken when the request was sent. */
-  | { type: 'snapshot'; id: string; snapshot: Snapshot; seen: { queueEvents: number; roundEvents: number; selectionEvents: number } }
+  | { type: 'snapshot'; id: string; snapshot: Snapshot; seen: { queueEvents: number; roundEvents: number; selectionEvents: number; switchesEvents?: number } }
   | { type: 'older'; id: string; records: ChatMessage[]; hasMore: boolean }
   | { type: 'event'; event: ServerEvent };
 
 export const initialState: State = { connected: false, groups: [], bots: [], activeId: null, byId: {}, unread: {}, quotas: {}, memoryChanges: {} };
-const emptyGroup: GroupState = { loaded: false, records: [], hasMore: false, queue: [], round: null, error: null, queueEvents: 0, roundEvents: 0, selection: {}, selectionEvents: 0 };
+const emptyGroup: GroupState = { loaded: false, records: [], hasMore: false, queue: [], round: null, error: null, queueEvents: 0, roundEvents: 0, selection: {}, selectionEvents: 0, switches: null, switchesEvents: 0 };
 
 export const groupState = (state: State, id: string): GroupState => state.byId[id] ?? emptyGroup;
-export const counters = (state: State, id: string) => { const group = groupState(state, id); return { queueEvents: group.queueEvents, roundEvents: group.roundEvents, selectionEvents: group.selectionEvents }; };
+export const counters = (state: State, id: string) => { const group = groupState(state, id); return { queueEvents: group.queueEvents, roundEvents: group.roundEvents, selectionEvents: group.selectionEvents, switchesEvents: group.switchesEvents }; };
 
 /** Union by seq, in seq order. The same message can arrive by push and by fetch. */
 export function mergeRecords(a: readonly ChatMessage[], b: readonly ChatMessage[]): ChatMessage[] {
@@ -125,6 +130,7 @@ export function reducer(state: State, action: Action): State {
       queue: group.queueEvents === action.seen.queueEvents ? action.snapshot.queue : group.queue,
       round: group.roundEvents === action.seen.roundEvents ? action.snapshot.round : group.round,
       selection: group.selectionEvents === action.seen.selectionEvents && action.snapshot.selection ? action.snapshot.selection : group.selection,
+      switches: group.switchesEvents === (action.seen.switchesEvents ?? 0) && action.snapshot.switches ? action.snapshot.switches : group.switches,
       error: null,
     }));
     case 'older': return withGroup(state, action.id, group => ({ ...group, records: mergeRecords(action.records, group.records), hasMore: action.hasMore }));
@@ -143,6 +149,7 @@ export function reducer(state: State, action: Action): State {
         case 'queue': return withGroup(state, id, group => ({ ...group, queue: event.queue, queueEvents: group.queueEvents + 1 }));
         case 'round': return withGroup(state, id, group => ({ ...group, round: event.round, roundEvents: group.roundEvents + 1 }));
         case 'selection': return withGroup(state, id, group => ({ ...group, selection: event.selection, selectionEvents: group.selectionEvents + 1 }));
+        case 'switches': return withGroup(state, id, group => ({ ...group, switches: event.switches, switchesEvents: group.switchesEvents + 1 }));
         case 'error': return withGroup(state, id, group => ({ ...group, error: event.message }));
       }
     }

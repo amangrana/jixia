@@ -21,7 +21,8 @@ export type ChatMessage = { seq: number; id: string; ts: string; from: string; t
 export type RoundInput = { message: PendingMessage; history: ChatMessage[] };
 export type BotReply = { reply: string; memoryRequests?: MemoryRequest[]; model?: string; effort?: string };
 // `model` and `effort` are what the group asks this bot to use; absent means the bot's own default.
-export type Bot = (input: RoundInput & { prompt?: string; stable?: string; model?: string; effort?: string }) => Promise<string | BotReply>;
+// `webSearch` and `keepSessions` are the group's switches; absent means off.
+export type Bot = (input: RoundInput & { prompt?: string; stable?: string; model?: string; effort?: string; webSearch?: boolean; keepSessions?: boolean }) => Promise<string | BotReply>;
 // Runs once per round before any bot starts and returns each target bot's
 // prompt, or the reason that bot must not be called this round.
 // `stable`, when given, is the leading part of `prompt` that rarely changes between rounds.

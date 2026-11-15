@@ -128,6 +128,8 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 - **模型和 effort：** Claude Code 用 `--model <名称>` 和 `--effort <档位>`；Codex 用 `--model <名称>` 和 `-c model_reasoning_effort="<档位>"`。选“默认”时不传对应参数，由 CLI 决定。
 - **模型列表：** Codex 用 `codex app-server`，按 JSON-RPC 发 `initialize` 后请求 `model/list`，隐藏的模型不列出；只有这个接口标出默认模型（`isDefault`）和每个模型的默认 effort。它标的默认模型不随配置文件里的 `model` 变化，是 Codex 内置的默认值，与 jixia 忽略用户配置后的调用一致。Claude Code 用 `claude -p --input-format stream-json --output-format stream-json --verbose --setting-sources ""` 启动后，从 stdin 发一条 `initialize` 控制请求，不发 prompt，从响应的 `models` 字段读取；其中 `default` 一项给出默认模型，不给默认 effort。这两种方式都不是 CLI 的正式功能，升级后可能变化，所以查询失败必须有退路。
 - **回答用的模型：** Claude Code 的 JSON 输出里有 `modelUsage`，记输出最多的那个模型名。Codex 的输出里没有模型名，记传给它的名称；没有指定时记启动查询得到的默认模型名，查不到时记为“默认模型”。
+- **会话保存（每个群单独设置，默认关闭）：** 关闭时 Claude Code 带 `--no-session-persistence`、Codex 带 `--ephemeral`，调用结束后 CLI 那边不留记录。打开后去掉这两个参数，每次调用像平时一样存成 CLI 的会话，可以在 CLI 里查看 jixia 发过去的完整内容和回答；代价是 Codex 的会话列表会混入 jixia 的调用，并且每次调用都占一份硬盘空间。适合排查问题时临时打开。对这个群的 bot 回答和压缩都适用。
+- **联网搜索（每个群单独设置，默认关闭）：** 关闭时这个群的两个 bot 都不能上网。打开后 Claude Code 多开放 `WebSearch` 和 `WebFetch` 两个工具，Codex 打开网页搜索；只读权限不变，仍然不能写文件。只用于回答你的问题，压缩不联网。代价：一次搜索会把网页内容放进上下文，比平常费额度；网页里的文字可能企图让 bot 读取 jixia 文件夹里的记忆或聊天记录，所以通用指令要求把网页内容当作资料、不当作指令。
 - **超时：** 按本次启动的 PID 终止整个进程树（`taskkill /PID … /T /F`），回收完成后才记为失败。
 
 ## Bot 指令与写记忆格式
@@ -242,6 +244,7 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 - 每次修改只提交改动的那一项（模型或 effort），同一个群的修改由后端逐个处理，每次都在上一次的结果上合并，所以快速连续修改或两个标签页同时修改都不会互相覆盖。换了模型、原来的 effort 新模型不支持时，effort 回到“默认”；明确选了新模型不支持的 effort 则拒绝。
 - 选择属于群，不属于单条消息。新建群时套用 `config.yaml` 里各 bot 的初始选择；之后在界面上改的选择只影响这个群，存进群的数据，一直保持到你再改，重启后还在。
 - 改动立即对之后开始的每一轮生效，包括已经在排队的消息：每一轮开始时读取该群此刻的选择。正在进行的一轮不受影响。
+- 模型下拉框旁边还有两个开关：“联网搜索”和“保存会话”（含义见“实测确定的调用方式”里的联网搜索和会话保存两条）。它们和模型选择一样属于群：新建群时套用 `config.yaml` 里的 `webSearch` 和 `keepCliSessions`（默认都是关闭），之后按群修改、按群保存，对之后开始的每一轮生效，包括已在排队的消息；和模型选择共用同一条按群串行的修改队列。
 - 每条回答记录并显示实际回答它的模型，以及 effort。两个 CLI 的回答都不说明用了哪档 effort：指定了的就记指定的；没指定时，启动查询报告了这个模型的默认 effort 就记它（Codex），否则不记（Claude Code）。失败的回答不显示。
 
 ## 技术选型

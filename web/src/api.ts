@@ -1,4 +1,4 @@
-import type { BotStatus, ChatMessage, ChoiceChange, GroupInfo, PendingMessage, MemoryFile, Quotas, Selection, Snapshot } from './state.ts';
+import type { BotStatus, ChatMessage, ChoiceChange, GroupInfo, PendingMessage, MemoryFile, Quotas, Selection, Snapshot, Switches } from './state.ts';
 
 /** A refusal from the backend. `code` is stable; `message` is ready to show. */
 export class ApiError extends Error {
@@ -35,6 +35,7 @@ export const api = {
   send: (id: string, messageId: string, content: string) => call<{ queued: boolean }>('POST', `${group(id)}/messages`, { id: messageId, content }),
   remove: (id: string, messageId: string) => call<{ message: PendingMessage }>('DELETE', `${group(id)}/queue/${encodeURIComponent(messageId)}`),
   /** Only the fields given are changed; null means "let the CLI decide". */
+  setSwitches: (id: string, change: Partial<Switches>) => call<{ switches: Switches }>('PUT', `${group(id)}/switches`, change),
   select: (id: string, bot: string, change: ChoiceChange) => call<{ selection: Selection }>('PUT', `${group(id)}/models/${encodeURIComponent(bot)}`, change),
   moveToTop: (id: string, messageId: string) => call<{ queue: PendingMessage[] }>('POST', `${group(id)}/queue/${encodeURIComponent(messageId)}/top`),
 };

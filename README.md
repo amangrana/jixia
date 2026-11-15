@@ -47,6 +47,7 @@ npm test
 - 输入框上方每个可用的 bot 有两个下拉框：模型和 effort。选择属于当前这个群，改了之后一直保持，重启后还在；对之后开始的每一轮生效，包括已经在排队的消息，正在进行的一轮不受影响。“默认”表示不指定，由 CLI 决定。effort 只列出所选模型支持的档位，换模型后不再支持的 effort 回到默认。
 - 下拉框的“默认”项写出 CLI 自己的默认值，例如“默认（Opus 5.5）”“默认（low）”；CLI 不报告的（Claude 的默认 effort）只写“默认”。
 - 新建群时套用 `config.yaml` 里各 bot 的 `model` 和 `effort`。这两项可以不写：不写时新群选“默认”，跟随 CLI 的默认模型，CLI 升级换了默认时也跟着换。
+- 下拉框旁边有“联网搜索”和“保存会话”两个开关，也按群设置、按群保存，对之后开始的每一轮生效，包括已在排队的消息。新建群时套用 `config.yaml` 里的 `webSearch` 和 `keepCliSessions`，默认都是关闭。
 - 群标题右边的“删除群”会先确认，再把群文件夹移到 `data/deleted/`，需要时手动移回 `data/groups/` 并重启即可恢复。正在回答的群不能删。
 - bot 名字旁有 ⚠ 时，表示这次启动没查到它的模型列表，鼠标停在上面能看到原因。
 - 左边栏的 bot 下面是订阅额度：“5 小时”和“每周”各一条进度条，显示已用百分比和重置时间，70% 起变黄、90% 起变红。启动时和之后每 5 分钟自动更新，“刷新”立即更新。这是整个订阅账号的用量，网页聊天和别处的 CLI 使用都算在里面。查询失败时保留上次的数值并变灰，写明是多久以前的。
@@ -135,7 +136,30 @@ node tests/server-live.mjs
 
 `config` 需要 `provider`（`claude` 或 `codex`）、`workDir`（已存在的空目录）、`readDir`（Claude Code 可读的目录，即 jixia 文件夹）和 `timeoutMs`；可选 `model`、`effort`、`executable`。Codex 的 effort 用 `-c model_reasoning_effort="…"` 传。
 
-返回值另带 `model`（和指定了时的 `effort`），调度器把它记在该条回答上，写进 `events.jsonl` 和 `records.jsonl`，但不放进发给 bot 的上下文。Claude Code 每次调用都会报告实际使用的模型，记的是这个名字（例如选 `haiku` 记为 `claude-haiku-5-5`）。Codex 的输出里没有模型名，记的是传给它的名称；没有指定时记为“默认模型”。
+返回值另带 `model` 和 `effort`，调度器把它记在该条回答上，写进 `events.jsonl` 和 `records.jsonl`，但不放进发给 bot 的上下文。Claude Code 每次调用都会报告实际使用的模型，记的是这个名字（例如选 `haiku` 记为 `claude-haiku-5-5`）。Codex 的输出里没有模型名，记的是传给它的名称；没有指定时记启动查询得到的默认模型。两个 CLI 都不报告 effort：记所选的；没选时 Codex 记该模型的默认 effort，Claude 不记。
+
+### 在 CLI 里查看 jixia 发出的内容
+
+默认每次调用结束后 CLI 那边不留记录（Claude Code 带 `--no-session-persistence`，Codex 带 `--ephemeral`）。在群里勾上“保存会话”后，这个群之后的每次调用（含压缩）都存成 CLI 自己的会话，里面有 jixia 发过去的完整内容和回答：
+
+- Claude Code：`~/.claude/projects/` 下 jixia 工作目录对应的文件夹（`data/work`），每次调用一个 `.jsonl` 文件。在 `data/work` 目录里运行 `claude --resume` 可以列出来。
+- Codex：`~/.codex/sessions/年/月/日/rollout-….jsonl`，`codex resume` 会和你自己的 Codex 会话列在一起。
+
+每次调用几十到一百多 KB，CLI 不会替你清理，用完记得关掉。
+
+### 联网搜索
+
+默认两个 bot 都不能上网。在群里勾上“联网搜索”后，这个群里：Claude Code 多开放 `WebSearch` 和 `WebFetch`（搜索和抓取网页）；Codex 打开网页搜索（`-c web_search="live"`），关闭时明确传 `disabled`，不让它自己的默认值决定。只读权限不变，仍然不能写文件；只用于回答你的问题，压缩不联网。
+
+- 搜索会把网页内容放进上下文，比平常费额度。
+- 通用指令要求 bot 需要最新信息时再搜、注明来源，并把网页内容当作资料：网页里要它读文件、写记忆或透露上下文的文字一律不照做。
+- 实测时 Claude 常常直接抓取网页而不是先搜索，两种都算联网。
+
+真实检查，4 个小模型请求，其中开搜索的 2 个更费额度：
+
+```powershell
+node tests/search-live.mjs
+```
 
 ## 订阅额度
 

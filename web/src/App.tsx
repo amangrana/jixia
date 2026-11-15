@@ -4,7 +4,7 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api, ApiError } from './api.ts';
 import { ageText, appendToDraft, estimateTokens, isDirty, loadLatest, memoryArrived, memoryLabel, completeMention, counters, defaultLabels, effortsFor, groupState, initialState, mentionAt, mentionOptions, quotaLevel, reducer, resetText } from './state.ts';
-import type { BotStatus, ChatMessage, Choice, ChoiceChange, GroupState, MemoryEntry, MemoryFile, PendingMessage, QuotaState, Selection, ServerEvent, State } from './state.ts';
+import type { BotStatus, ChatMessage, Choice, ChoiceChange, GroupState, MemoryEntry, MemoryFile, PendingMessage, QuotaState, Selection, ServerEvent, State, Switches } from './state.ts';
 
 // Unsent text per group. Kept in this browser so a reload does not lose it.
 const DRAFTS_KEY = 'jixia.drafts';
@@ -365,6 +365,8 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder, onDelete
       <ModelPickers bots={bots} selection={group.selection} disabled={!group.loaded} onPick={async (bot, change) => {
         // The backend's push updates the dropdowns; a refusal leaves them as they were.
         try { await api.select(id, bot, change); } catch (error) { toast(errorText(error)); }
+      }} switches={group.switches} onSwitch={async change => {
+        try { await api.setSwitches(id, change); } catch (error) { toast(errorText(error)); }
       }} />
       <form className="composer" onSubmit={event => { event.preventDefault(); void send(); }}>
         {listOpen && (
@@ -399,7 +401,10 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder, onDelete
 
 // One model and one effort dropdown per usable bot. The choice belongs to the
 // group and applies to every round that starts after it, queued messages included.
-function ModelPickers({ bots, selection, disabled, onPick }: { bots: BotStatus[]; selection: Selection; disabled: boolean; onPick: (bot: string, change: ChoiceChange) => void }) {
+function ModelPickers({ bots, selection, disabled, onPick, switches, onSwitch }: {
+  bots: BotStatus[]; selection: Selection; disabled: boolean; onPick: (bot: string, change: ChoiceChange) => void;
+  switches: Switches | null; onSwitch: (change: Partial<Switches>) => void;
+}) {
   const usable = bots.filter(bot => bot.enabled);
   if (!usable.length) return null;
   return (
@@ -429,6 +434,15 @@ function ModelPickers({ bots, selection, disabled, onPick }: { bots: BotStatus[]
           </span>
         );
       })}
+      {/* The box follows what the backend says; a click asks for the change and the push sets it. */}
+      <span className="switches">
+        <label title="打开后这个群的 bot 可以联网搜索和抓取网页，更费额度；仍然只读">
+          <input type="checkbox" disabled={disabled || !switches} checked={switches?.webSearch ?? false} onChange={event => onSwitch({ webSearch: event.target.checked })} /> 联网搜索
+        </label>
+        <label title="打开后这个群的每次调用都存成 CLI 自己的会话，可以在 claude --resume、codex resume 里查看">
+          <input type="checkbox" disabled={disabled || !switches} checked={switches?.keepSessions ?? false} onChange={event => onSwitch({ keepSessions: event.target.checked })} /> 保存会话
+        </label>
+      </span>
     </div>
   );
 }
