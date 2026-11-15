@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveTargets } from './routing.ts';
 import { estimateTokens } from './tokens.ts';
+import type { ApplyMemory, MemoryRequest } from './memory.ts';
 
 export const DEFAULT_MAX_MESSAGE_TOKENS = 30_000;
 /** Thrown by enqueue; the message was not queued, so the UI keeps the text in the input box. */
@@ -14,19 +15,22 @@ export type PendingMessage = { id: string; content: string; targets: string[] };
 // Omit targets to route by the @ mentions in the content.
 export type NewMessage = { id: string; content: string; targets?: string[] };
 // Key order matches the record example in the design doc; records.jsonl prints it as-is.
-export type ChatMessage = { seq: number; id: string; ts: string; from: string; type: 'user' | 'reply' | 'failure'; replyTo?: number; content: string };
+// A 'notice' is the app speaking in the group (from "system"), e.g. the outcome of a memory write.
+export type ChatMessage = { seq: number; id: string; ts: string; from: string; type: 'user' | 'reply' | 'failure' | 'notice'; replyTo?: number; content: string };
 export type RoundInput = { message: PendingMessage; history: ChatMessage[] };
-export type Bot = (input: RoundInput & { prompt?: string }) => Promise<string>;
+export type BotReply = { reply: string; memoryRequests?: MemoryRequest[] };
+export type Bot = (input: RoundInput & { prompt?: string }) => Promise<string | BotReply>;
 // Runs once per round before any bot starts and returns each target bot's
 // prompt, or the reason that bot must not be called this round.
 export type Prepare = (input: RoundInput) => Promise<Record<string, { prompt: string } | { error: string }>>;
-export type SchedulerOptions = { prepare?: Prepare; maxMessageTokens?: number };
+export type SchedulerOptions = { prepare?: Prepare; maxMessageTokens?: number; applyMemory?: ApplyMemory };
 type ActiveRound ={ message: PendingMessage; userSeq: number; outstanding: string[] };
 type Event =
   | { kind: 'enqueue'; message: PendingMessage }
   | { kind: 'remove' | 'top'; id: string }
   | { kind: 'start'; message: PendingMessage; user: ChatMessage }
   | { kind: 'result'; bot: string; message: ChatMessage }
+  | { kind: 'notice'; message: ChatMessage }
   | { kind: 'finish' };
 
 // One instance per group. The journal is authoritative: dequeue + chat insertion
@@ -41,6 +45,7 @@ export class Scheduler {
   #bots: Record<string, Bot>;
   #prepare: Prepare | undefined;
   #maxMessageTokens: number;
+  #applyMemory: ApplyMemory | undefined;
   #queue: PendingMessage[] = [];
   #history: ChatMessage[] = [];
   #seen = new Map<string, PendingMessage>();
@@ -57,6 +62,7 @@ export class Scheduler {
     this.#bots = bots;
     this.#prepare = options.prepare;
     this.#maxMessageTokens = options.maxMessageTokens ?? DEFAULT_MAX_MESSAGE_TOKENS;
+    this.#applyMemory = options.applyMemory;
   }
 
   static async open(directory: string, bots: Record<string, Bot>, options: SchedulerOptions = {}): Promise<Scheduler> {
@@ -134,7 +140,7 @@ export class Scheduler {
     } catch (error) { this.#poisoned = true; throw error; }
     this.#apply(event);
     if (event.kind === 'start') await this.#project(event.user);
-    else if (event.kind === 'result') await this.#project(event.message);
+    else if (event.kind === 'result' || event.kind === 'notice') await this.#project(event.message);
   }
 
   #apply(event: Event): void {
@@ -154,6 +160,10 @@ export class Scheduler {
       this.#history.push(event.message);
       this.#nextSeq = event.message.seq + 1;
       this.#active.outstanding = this.#active.outstanding.filter(bot => bot !== event.bot);
+    } else if (event.kind === 'notice') {
+      if (!this.#active) throw new Error('Invalid notice event');
+      this.#history.push(event.message);
+      this.#nextSeq = event.message.seq + 1;
     } else if (event.kind === 'finish') {
       if (!this.#active || this.#active.outstanding.length) throw new Error('Cannot finish incomplete round');
       this.#active = undefined;
@@ -198,7 +208,7 @@ export class Scheduler {
     });
   }
 
-  #result(bot: string, type: 'reply' | 'failure', content: string): ChatMessage {
+  #result(bot: string, type: 'reply' | 'failure' | 'notice', content: string): ChatMessage {
     return { seq: this.#nextSeq, id: randomUUID(), ts: new Date().toISOString(), from: bot, type, replyTo: this.#active!.userSeq, content };
   }
 
@@ -235,15 +245,29 @@ export class Scheduler {
       const results = await Promise.allSettled(input.message.targets.map(async bot => {
         let type: 'reply' | 'failure' = 'reply';
         let content: string;
+        let requests: MemoryRequest[] = [];
         try {
           if (prepareError !== undefined) throw new Error(prepareError);
           const entry = prepared?.[bot];
           if (this.#prepare && !entry) throw new Error('没有为该 bot 准备上下文');
           if (entry && 'error' in entry) throw new Error(entry.error);
-          content = await this.#bots[bot]({ ...structuredClone(input), ...(entry ? { prompt: entry.prompt } : {}) });
-          if (typeof content !== 'string') throw new Error('Bot returned non-text output');
+          const output = await this.#bots[bot]({ ...structuredClone(input), ...(entry ? { prompt: entry.prompt } : {}) });
+          const reply = typeof output === 'string' ? output : output?.reply;
+          if (typeof reply !== 'string') throw new Error('Bot returned non-text output');
+          content = reply;
+          if (typeof output !== 'string' && Array.isArray(output.memoryRequests)) requests = output.memoryRequests;
         } catch (error) { type = 'failure'; content = error instanceof Error ? error.message : String(error); }
-        await this.#serial(() => this.#record({ kind: 'result', bot, message: this.#result(bot, type, content) }));
+        await this.#serial(async () => {
+          await this.#record({ kind: 'result', bot, message: this.#result(bot, type, content) });
+          if (!requests.length) return;
+          // The file is written first and the notice recorded after. A crash in
+          // between loses the notice, never the memory; the file stays the truth.
+          let notices: string[];
+          if (!this.#applyMemory) notices = [`没有启用记忆写入，已忽略 ${bot} 的 ${requests.length} 条写记忆请求`];
+          else try { notices = await this.#applyMemory({ bot, targets: input.message.targets, requests }); }
+          catch (error) { notices = [`${bot} 的记忆写入失败：${error instanceof Error ? error.message : String(error)}`]; }
+          for (const notice of notices) await this.#record({ kind: 'notice', message: this.#result('system', 'notice', notice) });
+        });
       }));
       const failedWrite = results.find(result => result.status === 'rejected');
       if (failedWrite?.status === 'rejected') throw failedWrite.reason;

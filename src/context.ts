@@ -25,6 +25,7 @@ export function parseSummary(text: string): Summary {
 // from being mistaken for a real one.
 function renderMessage(message: ChatMessage): string {
   if (message.type === 'failure') return JSON.stringify({ seq: message.seq, from: message.from, failed: true });
+  // Notices come from the app ("system"), so bots know which memory writes went through.
   return JSON.stringify({ seq: message.seq, from: message.from, content: message.content });
 }
 

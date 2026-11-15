@@ -7,8 +7,10 @@ import { join } from 'node:path';
 // Flags follow "实测确定的调用方式" in the design doc; evidence is in
 // "jixia CLI 实测记录.md". Change them only together with a new probe.
 
+import type { MemoryRequest } from './memory.ts';
+
 export type Provider = 'claude' | 'codex';
-export type MemoryRequest = { target: 'common' | 'self'; op: 'append'; content: string };
+export type { MemoryRequest };
 export type BotOutput = { reply: string; memoryRequests: MemoryRequest[] };
 
 export type CliConfig = {

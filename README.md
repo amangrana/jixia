@@ -1,13 +1,13 @@
 # jixia
 
-当前包含 CLI 可行性测试、最小调度器核心、CLI adapter 和上下文拼装，尚无网页界面和 HTTP/WebSocket 服务；写记忆请求还没有执行。设计见 `jixia 设计文档 v1.md`，测试证据见 `jixia CLI 实测记录.md`。
+当前包含 CLI 可行性测试、最小调度器核心、CLI adapter、上下文拼装和长期记忆写入，尚无网页界面、HTTP/WebSocket 服务和自动 compact。设计见 `jixia 设计文档 v1.md`，测试证据见 `jixia CLI 实测记录.md`。
 
 ## 运行核心测试
 
 需要 Node 24 或更新版本，利用 Node 原生 TypeScript 类型擦除执行，不需要安装 npm 依赖。
 
 ```powershell
-node --test tests/scheduler.test.ts tests/routing.test.ts tests/cli.test.ts tests/context.test.ts
+node --test tests/scheduler.test.ts tests/routing.test.ts tests/cli.test.ts tests/context.test.ts tests/memory.test.ts
 ```
 
 普通安装了 npm 的终端也可以运行 `npm test`。这些测试只调用模拟 bot，不消耗模型额度，使用项目内随机临时目录并在完成后清理。测试包括终止自己创建的测试子进程来模拟崩溃。
@@ -48,7 +48,19 @@ node tests/cli-live.mjs
 - 通用指令、公共记忆、摘要读取出错时，本轮所有 bot 记为失败；某个 bot 的各自记忆读取出错时，只有它失败，其他 bot 照常回答。
 - 调用前用字数估算 token（中日韩字符算 1 个，其他字符 4 个算 1 个），超过上限（默认 12 万，可传 `maxPromptTokens`）时拒绝调用，不截断。提示会说明是“不算聊天历史就超限”还是“累计聊天历史过长，需要压缩”。后一种在 compact 实现之前没有恢复手段，只能新开一个群。
 
-走完整链路的真实检查，包括按用户要求读文件和写文件被拦住，每次运行发 7 个短请求：
+## 长期记忆写入
+
+bot 可以只返回一段文字，也可以返回 `{reply, memoryRequests}`。`src/memory.ts` 的 `createMemoryWriter(files)` 生成调度器用的 `applyMemory`，逐条处理请求，每条的结果作为一条 `type: "notice"`、`from: "system"` 的消息记进群里，紧跟在该 bot 的回答之后。
+
+- `common` 只接受本轮的写入者（消息只点名一个 bot 时是它，否则是 `defaultWriter`），其他 bot 的请求被拒绝并提示；`self` 写进该 bot 自己的文件。
+- 第一版只追加，每条写成一行 `[日期] 内容`，日期由 app 按本地时间加。写入用临时文件加改名；所有群共用一把锁，并行写入不丢条目。
+- 写入失败只产生一条提示，不影响 bot 的回答。文件估算超过 `maxMemoryTokens`（默认 8000）时提示整理，不拒绝也不裁剪。
+- 同一轮的 bot 看不到本轮写入的记忆（prompt 已提前拼好），下一轮才看到；提示消息会作为 `system` 的发言进入之后的上下文。
+- 先写文件、再记提示。两步之间崩溃时记忆已写入但群里少一条提示，以文件为准。
+
+## 真实链路检查
+
+走完整链路的真实检查，包括按用户要求读文件、写文件被拦住和一次真实的记忆写入，每次运行发 10 个短请求：
 
 ```powershell
 node tests/context-live.mjs
