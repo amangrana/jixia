@@ -97,6 +97,42 @@ test('concurrent enqueue-and-drain callers do not lose or duplicate messages', a
   assert.equal(scheduler.history.filter(m => m.type === 'user').length, 20);
 });
 
+test('messages without explicit targets are routed by their @ mentions', async t => {
+  const directory = await fixture(t);
+  const calls: string[] = [];
+  const bot = (name: string): Bot => async input => { calls.push(`${name}:${input.message.id}`); return 'ok'; };
+  const scheduler = await Scheduler.open(directory, { claude: bot('claude'), chatgpt: bot('chatgpt') });
+  await scheduler.enqueue({ id: 'everyone', content: '大家怎么看' });
+  await scheduler.enqueue({ id: 'one', content: '@chatgpt 你怎么看' });
+  assert.deepEqual(scheduler.queue.map(m => m.targets), [['claude', 'chatgpt'], ['chatgpt']]);
+  await scheduler.runUntilIdle();
+  assert.deepEqual(calls.sort(), ['chatgpt:everyone', 'chatgpt:one', 'claude:everyone']);
+});
+
+test('records.jsonl mirrors the chat history, with timestamps, and is rebuilt on open', async t => {
+  const directory = await fixture(t);
+  const bots = { claude: async () => 'answer', codex: async () => { throw new Error('boom'); } };
+  const readRecords = async () => (await readFile(join(directory, 'records.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+  let scheduler = await Scheduler.open(directory, bots);
+  assert.deepEqual(await readRecords(), []);
+  await scheduler.enqueue(message('first', ['claude', 'codex']));
+  await scheduler.enqueue(message('removed'));
+  await scheduler.remove('removed');
+  await scheduler.enqueue(message('second'));
+  await scheduler.runUntilIdle();
+  assert.deepEqual(await readRecords(), scheduler.history);
+  assert.deepEqual(scheduler.history.map(m => m.type).sort(), ['failure', 'reply', 'reply', 'user', 'user']);
+  for (const record of scheduler.history) assert.equal(new Date(record.ts).toISOString(), record.ts);
+  assert.deepEqual(Object.keys(scheduler.history[1]), ['seq', 'id', 'ts', 'from', 'type', 'replyTo', 'content']);
+  // The view is disposable: losing or corrupting it loses nothing.
+  await rm(join(directory, 'records.jsonl'));
+  scheduler = await Scheduler.open(directory, bots);
+  assert.deepEqual(await readRecords(), scheduler.history);
+  await appendFile(join(directory, 'records.jsonl'), 'garbage');
+  scheduler = await Scheduler.open(directory, bots);
+  assert.deepEqual(await readRecords(), scheduler.history);
+});
+
 test('real process termination recovers a partially answered round and queued message', { timeout: 15000 }, async t => {
   const directory = await fixture(t);
   const child = spawn(process.execPath, ['tests/fixtures/scheduler-crash.ts', directory], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });

@@ -1,9 +1,13 @@
-import { mkdir, open, readFile, truncate } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, rename, truncate, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { resolveTargets } from './routing.ts';
 
 export type PendingMessage = { id: string; content: string; targets: string[] };
-export type ChatMessage = { seq: number; id: string; from: string; type: 'user' | 'reply' | 'failure'; content: string; replyTo?: number };
+// Omit targets to route by the @ mentions in the content.
+export type NewMessage = { id: string; content: string; targets?: string[] };
+// Key order matches the record example in the design doc; records.jsonl prints it as-is.
+export type ChatMessage = { seq: number; id: string; ts: string; from: string; type: 'user' | 'reply' | 'failure'; replyTo?: number; content: string };
 export type Bot = (input: { message: PendingMessage; history: ChatMessage[] }) => Promise<string>;
 type ActiveRound = { message: PendingMessage; userSeq: number; outstanding: string[] };
 type Event =
@@ -17,6 +21,11 @@ type Event =
 // are represented by one event, avoiding a queue.json/JSONL two-file transaction.
 export class Scheduler {
   #file: string;
+  // Chat-only view derived from the journal, for people and bots to read.
+  // Never read back as state: it is rebuilt from the journal on every open.
+  #records: string;
+  #projecting = false;
+  #recordsStale = false;
   #bots: Record<string, Bot>;
   #queue: PendingMessage[] = [];
   #history: ChatMessage[] = [];
@@ -28,11 +37,15 @@ export class Scheduler {
   #poisoned = false;
   recoveryNotes: string[] = [];
 
-  private constructor(file: string, bots: Record<string, Bot>) { this.#file = file; this.#bots = bots; }
+  private constructor(directory: string, bots: Record<string, Bot>) {
+    this.#file = join(directory, 'events.jsonl');
+    this.#records = join(directory, 'records.jsonl');
+    this.#bots = bots;
+  }
 
   static async open(directory: string, bots: Record<string, Bot>): Promise<Scheduler> {
     await mkdir(directory, { recursive: true });
-    const scheduler = new Scheduler(join(directory, 'events.jsonl'), bots);
+    const scheduler = new Scheduler(directory, bots);
     let raw: Buffer;
     try { raw = await readFile(scheduler.#file); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; raw = Buffer.alloc(0); }
@@ -57,7 +70,27 @@ export class Scheduler {
       await scheduler.#record({ kind: 'finish' });
       scheduler.recoveryNotes.push('Interrupted round closed without retry');
     }
+    scheduler.#projecting = true;
+    try { await scheduler.#rebuildRecords(); }
+    catch { scheduler.#recordsStale = true; scheduler.recoveryNotes.push('Could not write records.jsonl; will retry'); }
     return scheduler;
+  }
+
+  async #rebuildRecords(): Promise<void> {
+    const temp = this.#records + '.tmp';
+    await writeFile(temp, this.#history.map(message => JSON.stringify(message) + '\n').join(''), 'utf8');
+    await rename(temp, this.#records);
+    this.#recordsStale = false;
+  }
+
+  // A failure here must not fail the round: the journal already holds the
+  // message, so mark the view stale and rebuild it on the next message.
+  async #project(message: ChatMessage): Promise<void> {
+    if (!this.#projecting) return;
+    try {
+      if (this.#recordsStale) await this.#rebuildRecords();
+      else await appendFile(this.#records, JSON.stringify(message) + '\n', 'utf8');
+    } catch { this.#recordsStale = true; }
   }
 
   get queue(): PendingMessage[] { return structuredClone(this.#queue); }
@@ -78,6 +111,8 @@ export class Scheduler {
     } catch (error) { this.#poisoned = true; throw error; }
     finally { await file.close(); }
     this.#apply(event);
+    if (event.kind === 'start') await this.#project(event.user);
+    else if (event.kind === 'result') await this.#project(event.message);
   }
 
   #apply(event: Event): void {
@@ -103,8 +138,12 @@ export class Scheduler {
     }
   }
 
-  enqueue(message: PendingMessage): Promise<boolean> {
-    const copy = structuredClone(message);
+  enqueue(message: NewMessage): Promise<boolean> {
+    const copy: PendingMessage = {
+      id: message.id,
+      content: message.content,
+      targets: message.targets ? [...message.targets] : resolveTargets(message.content, Object.keys(this.#bots)),
+    };
     return this.#serial(async () => {
       if (!copy.id || !copy.content.trim() || !copy.targets.length || new Set(copy.targets).size !== copy.targets.length || copy.targets.some(bot => typeof this.#bots[bot] !== 'function')) throw new Error('Invalid message or bot targets');
       const previous = this.#seen.get(copy.id);
@@ -134,7 +173,7 @@ export class Scheduler {
   }
 
   #result(bot: string, type: 'reply' | 'failure', content: string): ChatMessage {
-    return { seq: this.#nextSeq, id: randomUUID(), from: bot, type, content, replyTo: this.#active!.userSeq };
+    return { seq: this.#nextSeq, id: randomUUID(), ts: new Date().toISOString(), from: bot, type, replyTo: this.#active!.userSeq, content };
   }
 
   // The caller triggers draining after enqueue. Recheck after an existing run
@@ -151,7 +190,7 @@ export class Scheduler {
         if (this.#poisoned) throw new Error('Storage failed; reopen scheduler before continuing');
         const message = this.#queue[0];
         if (!message) return undefined;
-        await this.#record({ kind: 'start', message, user: { seq: this.#nextSeq, id: message.id, from: 'user', type: 'user', content: message.content } });
+        await this.#record({ kind: 'start', message, user: { seq: this.#nextSeq, id: message.id, ts: new Date().toISOString(), from: 'user', type: 'user', content: message.content } });
         return { message: structuredClone(message), history: structuredClone(this.#history) };
       });
       if (!input) return;
