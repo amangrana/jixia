@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -114,39 +114,67 @@ export function subscriptionEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.Pr
   return Object.fromEntries(Object.entries(env).filter(([name]) => !BILLING_OVERRIDE.test(name)));
 }
 
-export type ProcessResult = { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean };
+export type ProcessResult = {
+  stdout: string; stderr: string; exitCode: number | null; pid: number | undefined;
+  timedOut: boolean;
+  /** True when the process and its output pipes are confirmed closed. False means we stopped waiting. */
+  reaped: boolean;
+};
 
+// Only the PID from this exact spawn, never a process name. /T takes the
+// console host and any tool subprocesses with it. Asynchronous so a slow
+// taskkill cannot stall other groups; its outcome is confirmed by `close`.
 function killTree(pid: number): void {
-  // Only the PID from this exact spawn, never a process name. /T takes the
-  // console host and any tool subprocesses with it.
-  if (process.platform === 'win32') spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 10000 });
-  else try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  if (process.platform === 'win32') {
+    const killer = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10000 });
+    killer.once('error', () => {});
+    killer.unref();
+  } else try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
 }
 
-/** Runs one process with the prompt on stdin. Resolves only after the process has closed, including after a timeout kill. */
-export function runProcess(executable: string, args: string[], options: { cwd: string; input: string; timeoutMs: number; env?: NodeJS.ProcessEnv }): Promise<ProcessResult> {
+export const DEFAULT_GRACE_MS = 5000;
+
+/**
+ * Runs one process with the prompt on stdin. Always settles within
+ * timeoutMs + graceMs: a process that cannot be killed, or a descendant that
+ * keeps the output pipes open after the main process exits, must not block
+ * the group's queue forever.
+ */
+export function runProcess(executable: string, args: string[], options: { cwd: string; input: string; timeoutMs: number; graceMs?: number; env?: NodeJS.ProcessEnv; kill?: (pid: number) => void }): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { cwd: options.cwd, env: options.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
     let stdout = '', stderr = '', timedOut = false, settled = false;
+    let grace: NodeJS.Timeout | undefined;
     child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
     child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
     // The child may exit before reading all of stdin (bad flag, early failure).
     child.stdin.on('error', () => {});
+    const finish = (reaped: boolean) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); clearTimeout(grace);
+      if (!reaped) {
+        // Let go of whatever still holds the pipes so it cannot keep us, or the app, waiting.
+        child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy(); child.unref();
+      }
+      resolve({ stdout, stderr, exitCode: child.exitCode, pid: child.pid, timedOut, reaped });
+    };
+    // `close` normally follows within milliseconds of the kill or the exit.
+    // The grace period bounds the wait when it does not.
+    const startGrace = () => { grace ??= setTimeout(() => finish(false), graceMs); };
     const timer = setTimeout(() => {
-      if (settled || child.pid === undefined || child.exitCode !== null) return;
+      if (settled) return;
       timedOut = true;
-      killTree(child.pid);
+      if (child.pid !== undefined && child.exitCode === null) (options.kill ?? killTree)(child.pid);
+      startGrace();
     }, options.timeoutMs);
     child.once('error', error => {
       if (settled) return;
-      settled = true; clearTimeout(timer);
+      settled = true; clearTimeout(timer); clearTimeout(grace);
       reject(new CliError('spawn', `无法启动 ${executable}`, error.message));
     });
-    child.once('close', exitCode => {
-      if (settled) return;
-      settled = true; clearTimeout(timer);
-      resolve({ stdout, stderr, exitCode, timedOut });
-    });
+    child.once('exit', startGrace);
+    child.once('close', () => finish(true));
     child.stdin.end(options.input);
   });
 }
@@ -185,7 +213,12 @@ export async function runCli(config: CliConfig, prompt: string): Promise<BotOutp
       timeoutMs: config.timeoutMs,
       env: subscriptionEnv(config.env),
     });
-    if (result.timedOut) throw new CliError('timeout', `${NAME[config.provider]} 超过 ${Math.round(config.timeoutMs / 1000)} 秒没有回答，已终止`);
+    if (result.timedOut) {
+      const waited = `${NAME[config.provider]} 超过 ${Math.round(config.timeoutMs / 1000)} 秒没有回答`;
+      throw new CliError('timeout', result.reaped ? `${waited}，已终止` : `${waited}，进程回收未确认（PID ${result.pid}），可能仍在运行`);
+    }
+    // exitCode 0 with reaped false: the CLI finished, but something it started
+    // still held the pipes. Its answer is complete, so use it.
     if (result.exitCode !== 0) throw new CliError('exit', `${NAME[config.provider]} 异常退出（退出码 ${result.exitCode}）`, tail(result.stderr || result.stdout));
     const final = config.provider === 'codex' ? await readFile(files.final, 'utf8').catch(() => undefined) : undefined;
     return parseOutput(config.provider, result.stdout, final);

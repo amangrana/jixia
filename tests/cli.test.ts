@@ -89,7 +89,26 @@ test('a process that ignores stdin and never exits is killed at the timeout, and
   const started = Date.now();
   const result = await node(`setInterval(()=>{},1000)`, 400);
   assert.equal(result.timedOut, true);
-  assert(Date.now() - started < 8000);
+  assert.equal(result.reaped, true);
+  assert(Date.now() - started < 4000);
+});
+
+test('a descendant that keeps the pipes open after the main process exits cannot hold the call', async () => {
+  // Main prints its answer and exits at once; the descendant inherits stdout and lives on.
+  const script = `require('child_process').spawn(process.execPath,['-e','setTimeout(()=>{},4000)'],{stdio:'inherit',detached:true}).unref();process.stdout.write('answer');process.exit(0)`;
+  const started = Date.now();
+  const result = await runProcess(process.execPath, ['-e', script], { cwd: process.cwd(), input: '', timeoutMs: 60000, graceMs: 300 });
+  assert(Date.now() - started < 3000);
+  assert.deepEqual([result.exitCode, result.timedOut, result.reaped, result.stdout], [0, false, false, 'answer']);
+});
+
+test('when the kill does not take effect, the call still returns and says the process was not reaped', async () => {
+  const started = Date.now();
+  // The process exits by itself after 3s, so the test leaves nothing behind.
+  const result = await runProcess(process.execPath, ['-e', `setTimeout(()=>{},3000)`], { cwd: process.cwd(), input: '', timeoutMs: 200, graceMs: 200, kill: () => {} });
+  assert(Date.now() - started < 2000);
+  assert.deepEqual([result.timedOut, result.reaped], [true, false]);
+  assert.equal(typeof result.pid, 'number');
 });
 
 test('a missing executable is a spawn failure', async () => {

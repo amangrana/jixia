@@ -2,14 +2,26 @@ import { appendFile, mkdir, open, readFile, rename, truncate, writeFile } from '
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveTargets } from './routing.ts';
+import { estimateTokens } from './tokens.ts';
+
+export const DEFAULT_MAX_MESSAGE_TOKENS = 30_000;
+/** Thrown by enqueue; the message was not queued, so the UI keeps the text in the input box. */
+export class MessageTooLongError extends Error {
+  constructor(tokens: number, limit: number) { super(`消息过长，没有发送：估算 ${tokens} token，单条上限 ${limit}。请缩短或拆分后重发`); this.name = 'MessageTooLongError'; }
+}
 
 export type PendingMessage = { id: string; content: string; targets: string[] };
 // Omit targets to route by the @ mentions in the content.
 export type NewMessage = { id: string; content: string; targets?: string[] };
 // Key order matches the record example in the design doc; records.jsonl prints it as-is.
 export type ChatMessage = { seq: number; id: string; ts: string; from: string; type: 'user' | 'reply' | 'failure'; replyTo?: number; content: string };
-export type Bot = (input: { message: PendingMessage; history: ChatMessage[] }) => Promise<string>;
-type ActiveRound = { message: PendingMessage; userSeq: number; outstanding: string[] };
+export type RoundInput = { message: PendingMessage; history: ChatMessage[] };
+export type Bot = (input: RoundInput & { prompt?: string }) => Promise<string>;
+// Runs once per round before any bot starts and returns each target bot's
+// prompt, or the reason that bot must not be called this round.
+export type Prepare = (input: RoundInput) => Promise<Record<string, { prompt: string } | { error: string }>>;
+export type SchedulerOptions = { prepare?: Prepare; maxMessageTokens?: number };
+type ActiveRound ={ message: PendingMessage; userSeq: number; outstanding: string[] };
 type Event =
   | { kind: 'enqueue'; message: PendingMessage }
   | { kind: 'remove' | 'top'; id: string }
@@ -27,6 +39,8 @@ export class Scheduler {
   #projecting = false;
   #recordsStale = false;
   #bots: Record<string, Bot>;
+  #prepare: Prepare | undefined;
+  #maxMessageTokens: number;
   #queue: PendingMessage[] = [];
   #history: ChatMessage[] = [];
   #seen = new Map<string, PendingMessage>();
@@ -37,15 +51,17 @@ export class Scheduler {
   #poisoned = false;
   recoveryNotes: string[] = [];
 
-  private constructor(directory: string, bots: Record<string, Bot>) {
+  private constructor(directory: string, bots: Record<string, Bot>, options: SchedulerOptions) {
     this.#file = join(directory, 'events.jsonl');
     this.#records = join(directory, 'records.jsonl');
     this.#bots = bots;
+    this.#prepare = options.prepare;
+    this.#maxMessageTokens = options.maxMessageTokens ?? DEFAULT_MAX_MESSAGE_TOKENS;
   }
 
-  static async open(directory: string, bots: Record<string, Bot>): Promise<Scheduler> {
+  static async open(directory: string, bots: Record<string, Bot>, options: SchedulerOptions = {}): Promise<Scheduler> {
     await mkdir(directory, { recursive: true });
-    const scheduler = new Scheduler(directory, bots);
+    const scheduler = new Scheduler(directory, bots, options);
     let raw: Buffer;
     try { raw = await readFile(scheduler.#file); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; raw = Buffer.alloc(0); }
@@ -93,6 +109,8 @@ export class Scheduler {
     } catch { this.#recordsStale = true; }
   }
 
+  /** True after a storage failure: every further call fails until the group is opened again. */
+  get needsReopen(): boolean { return this.#poisoned; }
   get queue(): PendingMessage[] { return structuredClone(this.#queue); }
   get history(): ChatMessage[] { return structuredClone(this.#history); }
 
@@ -104,12 +122,16 @@ export class Scheduler {
 
   async #record(event: Event): Promise<void> {
     if (this.#poisoned) throw new Error('Storage failed; reopen scheduler before continuing');
-    const file = await open(this.#file, 'a');
+    // Any failure, including open and close, leaves it unknown whether the
+    // event reached the disk. Memory may then be ahead of or behind the journal,
+    // so stop here; reopening replays what is actually on disk.
     try {
-      await file.writeFile(JSON.stringify(event) + '\n', 'utf8');
-      await file.sync();
+      const file = await open(this.#file, 'a');
+      try {
+        await file.writeFile(JSON.stringify(event) + '\n', 'utf8');
+        await file.sync();
+      } finally { await file.close(); }
     } catch (error) { this.#poisoned = true; throw error; }
-    finally { await file.close(); }
     this.#apply(event);
     if (event.kind === 'start') await this.#project(event.user);
     else if (event.kind === 'result') await this.#project(event.message);
@@ -146,6 +168,10 @@ export class Scheduler {
     };
     return this.#serial(async () => {
       if (!copy.id || !copy.content.trim() || !copy.targets.length || new Set(copy.targets).size !== copy.targets.length || copy.targets.some(bot => typeof this.#bots[bot] !== 'function')) throw new Error('Invalid message or bot targets');
+      // A message enters every later prompt once it is in the history, so one
+      // oversized message would get every following round refused. Stop it here.
+      const tokens = estimateTokens(copy.content);
+      if (tokens > this.#maxMessageTokens) throw new MessageTooLongError(tokens, this.#maxMessageTokens);
       const previous = this.#seen.get(copy.id);
       if (previous) {
         if (previous.content !== copy.content || previous.targets.join('\0') !== copy.targets.join('\0')) throw new Error('Message ID reused with different payload');
@@ -188,6 +214,8 @@ export class Scheduler {
     while (true) {
       const input = await this.#serial(async () => {
         if (this.#poisoned) throw new Error('Storage failed; reopen scheduler before continuing');
+        // Starting a round would overwrite the unfinished one and drop its missing answers.
+        if (this.#active) throw new Error('Previous round is unfinished; reopen scheduler before continuing');
         const message = this.#queue[0];
         if (!message) return undefined;
         await this.#record({ kind: 'start', message, user: { seq: this.#nextSeq, id: message.id, ts: new Date().toISOString(), from: 'user', type: 'user', content: message.content } });
@@ -196,11 +224,23 @@ export class Scheduler {
       if (!input) return;
       // Freeze the shared history before invoking any adapter. Each adapter gets
       // its own copy so a mutation cannot contaminate another bot's input.
+      // All prompts are built before any bot starts, so bots in one round read
+      // the same history and memory even if a file changes mid-round.
+      let prepared: Awaited<ReturnType<Prepare>> | undefined;
+      let prepareError: string | undefined;
+      if (this.#prepare) {
+        try { prepared = await this.#prepare(structuredClone(input)); }
+        catch (error) { prepareError = error instanceof Error ? error.message : String(error); }
+      }
       const results = await Promise.allSettled(input.message.targets.map(async bot => {
         let type: 'reply' | 'failure' = 'reply';
         let content: string;
         try {
-          content = await this.#bots[bot](structuredClone(input));
+          if (prepareError !== undefined) throw new Error(prepareError);
+          const entry = prepared?.[bot];
+          if (this.#prepare && !entry) throw new Error('没有为该 bot 准备上下文');
+          if (entry && 'error' in entry) throw new Error(entry.error);
+          content = await this.#bots[bot]({ ...structuredClone(input), ...(entry ? { prompt: entry.prompt } : {}) });
           if (typeof content !== 'string') throw new Error('Bot returned non-text output');
         } catch (error) { type = 'failure'; content = error instanceof Error ? error.message : String(error); }
         await this.#serial(() => this.#record({ kind: 'result', bot, message: this.#result(bot, type, content) }));

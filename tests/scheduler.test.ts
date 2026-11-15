@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, appendFile, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, appendFile, readFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { Scheduler } from '../src/scheduler.ts';
+import { MessageTooLongError, Scheduler } from '../src/scheduler.ts';
 import type { Bot } from '../src/scheduler.ts';
 
 const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; };
@@ -95,6 +95,47 @@ test('concurrent enqueue-and-drain callers do not lose or duplicate messages', a
   assert.equal(new Set(calls).size, 20);
   assert.equal(scheduler.queue.length, 0);
   assert.equal(scheduler.history.filter(m => m.type === 'user').length, 20);
+});
+
+test('a storage failure mid-round stops the scheduler instead of skipping the unfinished round', async t => {
+  const base = await fixture(t);
+  const directory = join(base, 'group'), away = join(base, 'away');
+  const gate = deferred<string>(), started = deferred<void>();
+  const calls: string[] = [];
+  let scheduler = await Scheduler.open(directory, { claude: async input => { calls.push(input.message.id); started.resolve(); return input.message.id === 'm1' ? gate.promise : 'ok'; } });
+  await scheduler.enqueue(message('m1'));
+  await scheduler.enqueue(message('m2'));
+  const run = scheduler.runUntilIdle();
+  await started.promise;
+  await rename(directory, away); // The journal cannot be opened: saving the answer fails.
+  gate.resolve('lost answer');
+  await assert.rejects(run);
+  assert.equal(scheduler.needsReopen, true);
+  await rename(away, directory); // Storage is back, but memory and disk may disagree.
+  await assert.rejects(scheduler.runUntilIdle(), /reopen/);
+  await assert.rejects(scheduler.enqueue(message('m3')), /reopen/);
+  assert.deepEqual(calls, ['m1']); // m2 must not start on top of the unfinished round.
+  scheduler = await Scheduler.open(directory, { claude: async input => { calls.push(input.message.id); return 'ok'; } });
+  assert.deepEqual(scheduler.history.map(m => [m.seq, m.type]), [[1, 'user'], [2, 'failure']]);
+  assert.match(scheduler.history[1].content, /回答中断/);
+  assert.deepEqual(scheduler.queue.map(m => m.id), ['m2']);
+  await scheduler.runUntilIdle();
+  assert.deepEqual(calls, ['m1', 'm2']);
+  assert.deepEqual(scheduler.history.map(m => m.seq), [1, 2, 3, 4]);
+});
+
+test('an oversized message is refused at enqueue and leaves the group usable', async t => {
+  const directory = await fixture(t);
+  const calls: string[] = [];
+  const scheduler = await Scheduler.open(directory, { claude: async input => { calls.push(input.message.id); return 'ok'; } }, { maxMessageTokens: 100 });
+  await assert.rejects(scheduler.enqueue({ id: 'big', content: '很长的消息'.repeat(40) }), (error: unknown) => error instanceof MessageTooLongError && /估算 200 token，单条上限 100/.test(error.message));
+  assert.deepEqual([scheduler.queue.length, scheduler.history.length], [0, 0]);
+  await scheduler.enqueue({ id: 'small', content: '继续' });
+  // The refused ID was never accepted, so the shortened text can reuse it.
+  await scheduler.enqueue({ id: 'big', content: '缩短后的消息' });
+  await scheduler.runUntilIdle();
+  assert.deepEqual(calls, ['small', 'big']);
+  assert.equal(scheduler.history.filter(m => m.type === 'failure').length, 0);
 });
 
 test('messages without explicit targets are routed by their @ mentions', async t => {

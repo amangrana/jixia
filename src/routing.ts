@@ -4,6 +4,12 @@
 // is not a mention, while "请@claude看看" is.
 const MENTION = /(?<![A-Za-z0-9_.+-])[@＠]([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*)/g;
 
+// The one bot allowed to write common memory this round: the bot the message
+// singles out, otherwise the configured default writer.
+export function designatedWriter(targets: readonly string[], defaultWriter: string): string {
+  return targets.length === 1 ? targets[0] : defaultWriter;
+}
+
 export function resolveTargets(content: string, bots: readonly string[]): string[] {
   const mentioned = new Set<string>();
   for (const match of content.matchAll(MENTION)) {
