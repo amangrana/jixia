@@ -1,0 +1,9 @@
+{
+  "name": "jixia",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/scheduler.test.ts"
+  },
+  "engines": { "node": ">=24" }
+}
