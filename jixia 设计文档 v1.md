@@ -11,6 +11,7 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 - 本地网页聊天界面，支持多个群聊
 - @ 路由：@ 一个 bot 只有它回答，@all 或不 @ 时所有 bot 并行回答
 - 每个 bot 每次只回答一次，不自动接话
+- 每个群可以为每个 bot 选择模型和 reasoning effort；每条回答显示是哪个模型回答的
 - 两层 permanent memory + 每个群聊的 conversational memory
 - 对话过长时自动 compact
 
@@ -35,6 +36,13 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 
 浏览器只和本地后端通信。后端负责路由、拼上下文、压缩和读写本地文件，再用 headless 方式调用两个 CLI；CLI 每次调用完就退出，不需要另开终端。
 
+**启动时查询：** 每次启动，后端向两个 CLI 各做两件事，都不调用模型、不消耗额度：
+
+- 查登录方式，只有订阅登录的 bot 才启用。
+- 查模型列表：每个模型的名称和它支持的 effort 档位。结果存到数据目录，供界面的下拉框使用。查询失败时沿用上次存下的列表，界面提示“模型列表没有更新”，bot 照常可用。
+
+这些查询只说明 CLI 能启动、登录状态是什么，不等于连通检测：断网或额度用完要到实际发消息时才会作为失败显示在群里。列表里的模型也不保证在当前订阅下都能用，不能用的在调用时失败并显示原因。
+
 ## 消息路由
 
 | 写法 | 谁回答 | 方式 |
@@ -57,7 +65,7 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 
 1. 前端把消息发给调度层，进入该群的待处理消息队列，界面显示“排队中”。
 2. 该群没有正在处理的轮次时，调度层按当前队列顺序取出队首消息，写进原始记录，解析 @，决定发给谁。
-3. 启动任何 CLI 之前，先同步拼好本轮所有 bot 的 prompt，保证同一轮的 bot 读到同一份聊天历史和公共记忆；然后并行启动对应的 CLI。
+3. 启动任何 CLI 之前，先同步拼好本轮所有 bot 的 prompt，保证同一轮的 bot 读到同一份聊天历史和公共记忆；同时读取该群此刻为每个 bot 选定的模型和 effort；然后并行启动对应的 CLI。
 4. 每个回答返回后，调度层分配下一个 `seq`，写进原始记录，再通过 WebSocket 推给前端。
 5. 某个 CLI 超时或报错，群里显示一条“某某回答失败”，不影响其他 bot。
 6. 本轮所有目标 bot 都已结束（成功或失败，超时算失败），且本轮的记忆写入处理完毕后，本轮结束，开始处理队首的下一条消息。
@@ -88,6 +96,9 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 
 - **Claude Code：** `claude -p --tools Read --allowedTools Read --add-dir <jixia 文件夹> --strict-mcp-config --permission-mode dontAsk --no-session-persistence --output-format json`，加 `--setting-sources ""` 和 `--settings '{"claudeMdExcludes":["**"],"autoMemoryEnabled":false,"disableAllHooks":true}'` 隔离本机配置。回答取 JSON 外层的 `structured_output`。不用 `--bare`，它不读订阅登录。
 - **Codex：** `codex exec --ignore-user-config -c 'windows.sandbox="elevated"' -c project_doc_max_bytes=0 --skip-git-repo-check --sandbox read-only --cd <空工作目录> -`。`--ignore-user-config` 之后必须补回 Windows 沙箱设置，否则读写都被拦。回答用 `--output-last-message` 取，不解析终端输出。
+- **模型和 effort：** Claude Code 用 `--model <名称>` 和 `--effort <档位>`；Codex 用 `--model <名称>` 和 `-c model_reasoning_effort="<档位>"`。选“默认”时不传对应参数，由 CLI 决定。
+- **模型列表：** Codex 用 `codex debug models`，输出 JSON，标为隐藏的模型不列出。Claude Code 用 `claude -p --input-format stream-json --output-format stream-json --verbose` 启动后，从 stdin 发一条 `initialize` 控制请求，不发 prompt，从响应的 `models` 字段读取。这两种方式都不是 CLI 的正式功能，升级后可能变化，所以查询失败必须有退路。
+- **回答用的模型：** Claude Code 的 JSON 输出里有 `modelUsage`，记输出最多的那个模型名。Codex 的输出里没有模型名，记传给它的名称；没有指定时记为“默认模型”。
 - **超时：** 按本次启动的 PID 终止整个进程树（`taskkill /PID … /T /F`），回收完成后才记为失败。
 
 ## Bot 指令与写记忆格式
@@ -178,10 +189,17 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 
 **模型配置：** 每类任务单独配置模型和 reasoning effort，可以随时调。
 
-| 任务 | 默认 |
-| --- | --- |
-| 回答你的问题 | 各 bot 的主力模型 |
-| 压缩对话 | 中档模型（如 Sonnet），低 effort |
+| 任务 | 默认 | 在哪里改 |
+| --- | --- | --- |
+| 回答你的问题 | 各 bot 的主力模型 | `config.yaml` 设默认值；界面上按群选择 |
+| 压缩对话 | 中档模型（如 Sonnet），低 effort | 只在 `config.yaml` |
+
+**按群选择模型和 effort：**
+
+- 输入框旁边每个 bot 有一组下拉框：模型和 effort。选项来自启动时查到的模型列表；第一项是“默认”，即不指定、由 CLI 决定。effort 只列出所选模型支持的档位；换模型后原来的 effort 不被支持时，effort 回到“默认”。
+- 选择属于群，不属于单条消息。新建群时套用 `config.yaml` 里各 bot 的默认值；之后在界面上改的选择只影响这个群，存进群的数据，一直保持到你再改，重启后还在。
+- 改动立即对之后开始的每一轮生效，包括已经在排队的消息：每一轮开始时读取该群此刻的选择。正在进行的一轮不受影响。
+- 每条回答记录并显示实际回答它的模型，以及指定了的 effort。失败的回答不显示。
 
 ## 技术选型
 
@@ -201,6 +219,8 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 ```json
 {"seq": 42, "id": "…", "ts": "2026-11-14T19:42:00-05:00", "from": "claude", "type": "reply", "replyTo": 41, "content": "……"}
 ```
+
+bot 的回答另带 `model`，指定了 effort 时还有 `effort`；这两个字段只用于显示，不放进发给 bot 的上下文。
 
 用户消息的 `id` 由前端生成，bot 回答的 `id` 由调度层生成。加载事件日志时，末尾没有换行的不完整一行丢弃并提示；其他位置解析失败则停止加载并提示。
 
@@ -224,6 +244,10 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 - [ ] 关掉再打开，群聊记录和记忆都还在
 - [ ] 群聊变长后自动 compact，原始记录完整保留
 - [ ] 调用确认走的是订阅额度，不是 API key
+- [ ] 每条回答旁边显示回答它的模型
+- [ ] 在一个群里换模型或 effort 后，之后开始的每一轮（包括已在排队的消息）都按新选择调用，回答显示的模型与所选一致；别的群不受影响，重启后选择还在
+- [ ] 新建的群使用 `config.yaml` 里的默认模型和 effort
+- [ ] 启动时模型列表查询失败不影响发消息，界面有提示
 
 ## 实现前的实测
 
@@ -236,7 +260,8 @@ jixia 是一个本地群聊 app：在一个聊天界面里，让 Claude 和 Chat
 - [ ] 在 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md` 各放一个暗号，确认隔离后 bot 看不到（只测了项目级的指令文件）
 - [x] 让 bot 列出可用工具、读取工作目录外的文件、写一个文件，确认能读、不能写
 - [x] 结构化输出（Claude 的 `--json-schema`、Codex 的 `--output-schema`）可用，采用它分离回答和写记忆请求
-- [ ] 订阅下 `--model` 能选哪些模型（只验证了 Claude 的 `sonnet`）
+- [x] 订阅下能选哪些模型：改为启动时向 CLI 查询，两种查询方式都已跑通，不消耗额度。逐个模型在订阅下是否可用没有测，只实际调用过 Claude 的 `sonnet` 和 Codex 的 `gpt-5.6-luna`
+- [x] Codex 的 effort 参数：`-c model_reasoning_effort="low"` 调用成功；填不存在的档位时服务端报错，说明参数确实传到了请求里
 - [ ] 每轮实际消耗多少额度；独立进程之间能否命中 prompt cache；CLI 自带的 system prompt 占多少 token
 
 ## 风险与待定问题

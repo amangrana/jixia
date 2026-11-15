@@ -3,14 +3,15 @@
 
 port: 4517                # 只监听 127.0.0.1
 
-bots:
+bots:                     # model 和 effort 是新建群时的初始选择；之后在界面上按群改
   claude:
     provider: claude      # Claude Code
     # model: sonnet
-    # effort: low         # 目前只有 claude 支持
+    # effort: low
   chatgpt:
     provider: codex       # Codex CLI
-    # model: ...
+    # model: gpt-6-luna
+    # effort: low
 
 defaultWriter: claude     # 公共记忆的默认写入者；消息只 @ 一个 bot 时由那个 bot 写
 
@@ -22,3 +23,11 @@ maxMessageTokens: 30000   # 单条消息上限（估算），超过就不入队
 maxMemoryTokens: 8000     # 记忆文件超过这个大小时提示整理
 
 requireSubscription: true # 只在 CLI 是订阅登录时启用对应的 bot
+
+compact:                  # 对话过长时自动压缩成摘要；指令在 prompts/compact.md
+  provider: claude        # 用哪个 CLI 做压缩：claude 或 codex
+  model: sonnet
+  effort: low
+  thresholdTokens: 40000  # 摘要加摘要之后的原文超过这个大小（估算）就压缩
+  keepRounds: 3           # 最近几轮始终保留原文
+  maxSummaryTokens: 4000  # 摘要长度上限（估算），超过就不采用

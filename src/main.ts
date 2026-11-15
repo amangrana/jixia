@@ -1,4 +1,6 @@
+import { mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+import { loadModels } from './models.ts';
 import { fileURLToPath } from 'node:url';
 import { checkLogin } from './auth.ts';
 import { loadConfig } from './config.ts';
@@ -18,7 +20,12 @@ for (const [name, bot] of Object.entries(config.bots)) {
   logins[name] = await byProvider.get(bot.provider)!;
 }
 
-const groups = await Groups.open({ root, config, logins });
+// Also asked on every start: which models each CLI offers. No model is called.
+const work = join(root, 'data', 'work');
+await mkdir(work, { recursive: true });
+const models = await loadModels({ cachePath: join(root, 'data', 'models.json'), providers: [...byProvider.keys()], workDir: work });
+
+const groups = await Groups.open({ root, config, logins, models });
 const server = await startServer({ groups, port: config.port, staticDir: join(root, 'web', 'dist') });
 console.log(`jixia 已启动，在浏览器里打开：http://127.0.0.1:${server.port}`);
-for (const bot of groups.bots) console.log(`  ${bot.name}（${bot.provider}）：${bot.enabled ? '已启用' : '未启用'}，${bot.login.detail}`);
+for (const bot of groups.bots) console.log(`  ${bot.name}（${bot.provider}）：${bot.enabled ? '已启用' : '未启用'}，${bot.login.detail}；${bot.models.note ?? `可选 ${bot.models.models.length} 个模型`}`);

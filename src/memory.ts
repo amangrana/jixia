@@ -1,4 +1,5 @@
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { replaceFile } from './files.ts';
 import { designatedWriter } from './routing.ts';
 import { estimateTokens } from './tokens.ts';
 
@@ -42,8 +43,7 @@ export function createMemoryWriter(files: MemoryFiles): ApplyMemory {
     if (existing && !existing.endsWith('\n')) existing += '\n';
     const updated = `${existing}[${localDate((files.now ?? (() => new Date()))())}] ${content}\n`;
     // Temp file then rename: a crash mid-write must not leave half a memory file.
-    await writeFile(path + '.tmp', updated, 'utf8');
-    await rename(path + '.tmp', path);
+    await replaceFile(path, updated);
     return estimateTokens(updated);
   });
 

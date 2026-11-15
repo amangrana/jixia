@@ -98,8 +98,12 @@ export async function startServer(options: { groups: Groups; port: number; stati
       return { body: await groups.use(id, scheduler => {
         const history = scheduler.history;
         const records = history.slice(-pageSize(url.searchParams.get('limit')));
-        return { group, records, hasMore: records.length < history.length, queue: scheduler.queue, round: scheduler.round };
+        return { group, records, hasMore: records.length < history.length, queue: scheduler.queue, round: scheduler.round, selection: groups.selection(id) };
       }) };
+    }
+    if (is('PUT', 'api', 'groups', null, 'models', null)) {
+      const body = await readJson(request);
+      return { body: { selection: await groups.select(id, parts[4], { model: body.model, effort: body.effort }) } };
     }
     if (is('GET', 'api', 'groups', null, 'records')) {
       const before = Number(url.searchParams.get('before'));

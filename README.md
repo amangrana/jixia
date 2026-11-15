@@ -1,6 +1,6 @@
 # jixia
 
-当前可以在浏览器里使用：多个群、@ 路由、消息排队、长期记忆都已接通。还没有自动 compact，一个群聊得太长时会提示上下文过长，需要新开一个群。
+当前可以在浏览器里使用：多个群、@ 路由、消息排队、长期记忆、对话过长时的自动压缩都已接通。
 
 ## 启动
 
@@ -41,6 +41,10 @@ npm test
 - 当前这轮没结束时可以继续发，消息进入“排队中”，每条可以移到队首、编辑、删除。编辑会把原文追加到输入框里已有草稿的后面，重新发送后排到队尾。
 - 发送失败或消息过长时，文字留在输入框里。没发出去的草稿按群保存在浏览器里，刷新不丢。
 - 连接断开时顶部有提示，并自动重连；重连后重新拉取当前群的记录和队列。
+- 输入框上方每个可用的 bot 有两个下拉框：模型和 effort。选择属于当前这个群，改了之后一直保持，重启后还在；对之后开始的每一轮生效，包括已经在排队的消息，正在进行的一轮不受影响。“默认”表示不指定，由 CLI 决定。effort 只列出所选模型支持的档位，换模型后不再支持的 effort 回到默认。
+- 新建群时套用 `config.yaml` 里各 bot 的 `model` 和 `effort`。
+- bot 名字旁有 ⚠ 时，表示这次启动没查到它的模型列表，鼠标停在上面能看到原因。
+- 每条回答的 bot 名字旁边显示回答它的模型，指定了 effort 时一并显示。失败的回答和这项功能之前的旧记录不显示。
 - 跟随系统的浅色或深色模式。
 
 `web/src/state.ts` 是全部的前端状态规则，不依赖浏览器，测试在 `tests/web-state.test.ts`。
@@ -111,7 +115,7 @@ node tests/server-live.mjs
 - `runUntilIdle()`：开始／等待处理队列。服务调用方在入队后触发；本核心没有后台常驻循环。
 - `queue`、`history`：返回快照，不向外暴露可变状态。
 
-一个 bot 失败会记录 failure，另一个继续完成；下一轮等待所有结果落盘。Bot adapter 收到独立的本轮历史快照；永久记忆、compact、结构化记忆请求和进程超时回收尚未接入核心。未来 adapter 需在超时时完成进程树回收后再返回失败。
+一个 bot 失败会记录 failure，另一个继续完成；下一轮等待所有结果落盘。Bot adapter 收到独立的本轮历史快照；永久记忆、compact、结构化记忆请求和进程超时回收都在调度器之外实现，见后面各节。
 
 ## CLI adapter
 
@@ -119,7 +123,28 @@ node tests/server-live.mjs
 
 超时后终止整个进程树，再最多等 5 秒宽限期。一次调用最迟在“超时加宽限期”时返回，不会一直挂住本群的队列。失败提示区分两种：进程已确认终止；回收未确认（提示里带 PID，进程可能仍在运行）。CLI 正常退出但它启动的后代进程还占着输出管道时，宽限期后照常使用已得到的回答。
 
-`config` 需要 `provider`（`claude` 或 `codex`）、`workDir`（已存在的空目录）、`readDir`（Claude Code 可读的目录，即 jixia 文件夹）和 `timeoutMs`；可选 `model`、`effort`（仅 Claude Code）、`executable`。
+`config` 需要 `provider`（`claude` 或 `codex`）、`workDir`（已存在的空目录）、`readDir`（Claude Code 可读的目录，即 jixia 文件夹）和 `timeoutMs`；可选 `model`、`effort`、`executable`。Codex 的 effort 用 `-c model_reasoning_effort="…"` 传。
+
+返回值另带 `model`（和指定了时的 `effort`），调度器把它记在该条回答上，写进 `events.jsonl` 和 `records.jsonl`，但不放进发给 bot 的上下文。Claude Code 每次调用都会报告实际使用的模型，记的是这个名字（例如选 `haiku` 记为 `claude-haiku-5-5`）。Codex 的输出里没有模型名，记的是传给它的名称；没有指定时记为“默认模型”。
+
+## 模型列表与按群选择
+
+`src/models.ts`。每次启动向两个 CLI 各查一次模型列表，不调用模型、不消耗额度，两个查询合计约 1.5 秒：
+
+- Codex：`codex debug models`，标为隐藏的模型不列出。
+- Claude Code：启动 CLI 后从 stdin 发一条 `initialize` 控制请求，不发 prompt，从响应里读 `models`。
+
+结果存到 `data/models.json`。某个 CLI 查询失败时沿用上次存下的列表，并在界面上提示；从没查到过时只能用默认模型。这两种查询方式都不是 CLI 的正式功能，CLI 升级后可能失效。查询成功只说明 CLI 能启动，不代表发消息一定能得到回答；列表里的模型也不保证在当前订阅下都能用，不能用的在调用时失败并显示原因。
+
+每个群的选择存在该群文件夹的 `settings.json`。后端在有模型列表时按列表校验模型和 effort；模型和 effort 的名称只接受字母、数字和 `. _ : - [ ]`。压缩用的模型只在 `config.yaml` 里设。
+
+接口：`GET /api/status` 的每个 bot 带 `models`；`GET /api/groups/:id` 带 `selection`；`PUT /api/groups/:id/models/:bot` 提交 `{model, effort}`，`null` 表示默认；改动通过 `/ws` 推送 `{group, type: "selection", selection}`。
+
+真实调用的检查脚本：真实查询两个 CLI 的模型列表，再让两个 bot 各用指定的小模型和 `low` 回答一次，共 2 个请求：
+
+```powershell
+node tests/models-live.mjs
+```
 
 真实调用的检查脚本不在 `npm test` 里，每次运行发 4 个短请求、消耗订阅额度：
 
@@ -134,7 +159,27 @@ node tests/cli-live.mjs
 - 通用指令在 `prompts/system.md`，其中 `{{self}}`、`{{members}}`、`{{records}}` 在拼装时替换。
 - 摘要文件以 `---`、`coveredThroughSeq: N`、`---` 三行开头；没有这个文件头时整轮记为失败，不猜测边界。记忆和摘要文件不存在时按空处理。
 - 通用指令、公共记忆、摘要读取出错时，本轮所有 bot 记为失败；某个 bot 的各自记忆读取出错时，只有它失败，其他 bot 照常回答。
-- 调用前用字数估算 token（中日韩字符算 1 个，其他字符 4 个算 1 个），超过上限（默认 12 万，可传 `maxPromptTokens`）时拒绝调用，不截断。提示会说明是“不算聊天历史就超限”还是“累计聊天历史过长，需要压缩”。后一种在 compact 实现之前没有恢复手段，只能新开一个群。
+- 调用前用字数估算 token（中日韩字符算 1 个，其他字符 4 个算 1 个），超过上限（默认 12 万，可传 `maxPromptTokens`）时拒绝调用，不截断。提示会说明是“不算聊天历史就超限”还是“累计聊天历史过长，需要压缩”。后一种由自动压缩处理，见下一节。
+- 摘要必须和聊天记录对得上：`coveredThroughSeq` 不能超过最后一条记录、必须落在一轮的末尾，覆盖范围大于 0 时正文不能为空。对不上时整轮记为失败，提示里给出摘要文件的路径；删掉该文件后改用全部原文。
+
+## 对话压缩
+
+`src/compact.ts`。每轮结束后在后台检查，不延迟回答的显示；每个群同时最多一个压缩任务。
+
+- **触发：** 摘要加上摘要之后的原文，估算超过 `compact.thresholdTokens`（默认 4 万）。
+- **范围：** 只压缩已完成的轮次，最近 `compact.keepRounds` 轮（默认 3）始终保留原文。输入是旧摘要加上 `(coveredThroughSeq, cutoff]` 的原文，一次模型调用，所有 bot 共用一份摘要。
+- **积压过多：** 要压缩的原文一次放不进上下文预算时，先压缩放得下的那几轮，写入后接着压缩剩下的。连最早的一轮都放不下时报错。
+- **校验：** 摘要必须依次包含五节标题，估算长度不超过 `compact.maxSummaryTokens`（默认 4000），否则不采用。
+- **写入：** 先写临时文件再改名，一次替换 `summary.md`。压缩期间开始的新一轮使用旧摘要加更多原文。
+- **失败：** 保留旧摘要，界面上提示原因，下一轮结束后重试。应用重启后打开群时也会检查一次。
+- **原文：** `events.jsonl` 和 `records.jsonl` 始终完整，压缩只影响发给模型的内容。
+- 指令在 `prompts/compact.md`，其中 `{{maxChars}}` 替换为长度上限。用哪个 CLI、模型和 effort 在 `config.yaml` 的 `compact` 一节，默认是 Claude Code 的 `sonnet`、`low`。压缩调用和 bot 一样只走订阅登录，并计入全局的 CLI 并发上限。
+
+真实调用的检查脚本，每次运行发 3 个请求（1 次压缩，两个 bot 各 1 次根据摘要回答）：
+
+```powershell
+node tests/compact-live.mjs
+```
 
 ## 长期记忆写入
 

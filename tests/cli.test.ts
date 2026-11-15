@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildArgs, CliError, parseOutput, runProcess, subscriptionEnv, validateOutput } from '../src/cli.ts';
+import { buildArgs, CliError, parseOutput, runProcess, subscriptionEnv, usedModel, validateOutput } from '../src/cli.ts';
 import type { CliConfig } from '../src/cli.ts';
 
 // None of these call a model. The live check is tests/cli-live.mjs.
@@ -49,6 +49,10 @@ test('Codex arguments use the read-only sandbox, ignore user config and read the
   assert.equal(after('--output-schema'), 'S.json');
   assert.equal(after('--output-last-message'), 'F.json');
   assert.equal(after('--model'), 'm');
+  assert(!args.some(arg => arg.startsWith('model_reasoning_effort')));
+  const withEffort = buildArgs(config('codex', { effort: 'low' }), files);
+  assert.equal(withEffort[withEffort.indexOf('model_reasoning_effort="low"') - 1], '-c');
+  assert(!withEffort.includes('--model'));
   assert(args.includes('project_doc_max_bytes=0'));
   assert.equal(args.includes('windows.sandbox="elevated"'), process.platform === 'win32');
 });
@@ -61,6 +65,15 @@ test('output is taken from the structured field or the final-message file, never
   invalid(() => parseOutput('claude', 'not json', undefined));
   invalid(() => parseOutput('codex', JSON.stringify(good), undefined));
   invalid(() => parseOutput('codex', '', '{"reply":'));
+});
+
+test('the model that answered comes from what Claude Code reports; Codex falls back to the configured one', () => {
+  const stdout = JSON.stringify({ structured_output: good, modelUsage: { 'claude-haiku-5-5': { outputTokens: 12 }, 'claude-fable-5-2': { outputTokens: 269 } } });
+  assert.equal(usedModel('claude', stdout, 'sonnet'), 'claude-fable-5-2');
+  assert.equal(usedModel('claude', JSON.stringify({ structured_output: good }), 'sonnet'), 'sonnet');
+  assert.equal(usedModel('claude', 'not json', undefined), '默认模型');
+  assert.equal(usedModel('codex', stdout, 'gpt-x'), 'gpt-x');
+  assert.equal(usedModel('codex', '', undefined), '默认模型');
 });
 
 test('billing overrides are removed from the child environment only', () => {

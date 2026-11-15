@@ -16,10 +16,12 @@ export type PendingMessage = { id: string; content: string; targets: string[] };
 export type NewMessage = { id: string; content: string; targets?: string[] };
 // Key order matches the record example in the design doc; records.jsonl prints it as-is.
 // A 'notice' is the app speaking in the group (from "system"), e.g. the outcome of a memory write.
-export type ChatMessage = { seq: number; id: string; ts: string; from: string; type: 'user' | 'reply' | 'failure' | 'notice'; replyTo?: number; content: string };
+// `model` and `effort` are on answers only, and only when the bot reported them.
+export type ChatMessage = { seq: number; id: string; ts: string; from: string; type: 'user' | 'reply' | 'failure' | 'notice'; replyTo?: number; content: string; model?: string; effort?: string };
 export type RoundInput = { message: PendingMessage; history: ChatMessage[] };
-export type BotReply = { reply: string; memoryRequests?: MemoryRequest[] };
-export type Bot = (input: RoundInput & { prompt?: string }) => Promise<string | BotReply>;
+export type BotReply = { reply: string; memoryRequests?: MemoryRequest[]; model?: string; effort?: string };
+// `model` and `effort` are what the group asks this bot to use; absent means the bot's own default.
+export type Bot = (input: RoundInput & { prompt?: string; model?: string; effort?: string }) => Promise<string | BotReply>;
 // Runs once per round before any bot starts and returns each target bot's
 // prompt, or the reason that bot must not be called this round.
 export type Prepare = (input: RoundInput) => Promise<Record<string, { prompt: string } | { error: string }>>;
@@ -272,6 +274,7 @@ export class Scheduler {
         let type: 'reply' | 'failure' = 'reply';
         let content: string;
         let requests: MemoryRequest[] = [];
+        const answeredBy: { model?: string; effort?: string } = {};
         try {
           if (prepareError !== undefined) throw new Error(prepareError);
           const entry = prepared?.[bot];
@@ -281,10 +284,13 @@ export class Scheduler {
           const reply = typeof output === 'string' ? output : output?.reply;
           if (typeof reply !== 'string') throw new Error('Bot returned non-text output');
           content = reply;
-          if (typeof output !== 'string' && Array.isArray(output.memoryRequests)) requests = output.memoryRequests;
+          if (typeof output !== 'string') {
+            if (Array.isArray(output.memoryRequests)) requests = output.memoryRequests;
+            for (const key of ['model', 'effort'] as const) if (typeof output[key] === 'string' && output[key]) answeredBy[key] = output[key];
+          }
         } catch (error) { type = 'failure'; content = error instanceof Error ? error.message : String(error); }
         await this.#serial(async () => {
-          await this.#record({ kind: 'result', bot, message: this.#result(bot, type, content) });
+          await this.#record({ kind: 'result', bot, message: { ...this.#result(bot, type, content), ...answeredBy } });
           if (!requests.length) return;
           // The file is written first and the notice recorded after. A crash in
           // between loses the notice, never the memory; the file stays the truth.

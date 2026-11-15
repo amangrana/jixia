@@ -208,3 +208,22 @@ test('real process termination recovers a partially answered round and queued me
   const raw = await readFile(join(directory, 'events.jsonl'), 'utf8');
   assert(raw.endsWith('\n'));
 });
+
+test('an answer records which model and effort produced it; failures and plain-text answers record none', async t => {
+  const directory = await fixture(t);
+  const bots: Record<string, Bot> = {
+    claude: async () => ({ reply: '好', model: 'claude-fable-5-2', effort: 'low' }),
+    chatgpt: async () => ({ reply: '行', model: '' }),
+    plain: async () => '纯文本',
+    broken: async () => { throw new Error('超时'); },
+  };
+  const scheduler = await Scheduler.open(directory, bots);
+  await scheduler.enqueue(message('m1', ['claude', 'chatgpt', 'plain', 'broken']));
+  await scheduler.runUntilIdle();
+  const by = (name: string) => scheduler.history.find(entry => entry.from === name)!;
+  assert.deepEqual([by('claude').model, by('claude').effort], ['claude-fable-5-2', 'low']);
+  for (const name of ['chatgpt', 'plain', 'broken', 'user']) assert(!('model' in by(name)) && !('effort' in by(name)), name);
+  // It is part of the journal and of the readable records, so it survives a restart.
+  assert.equal((await Scheduler.open(directory, bots)).history.find(entry => entry.from === 'claude')!.model, 'claude-fable-5-2');
+  assert((await readFile(join(directory, 'records.jsonl'), 'utf8')).includes('"model":"claude-fable-5-2","effort":"low"'));
+});

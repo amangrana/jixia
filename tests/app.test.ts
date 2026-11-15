@@ -59,9 +59,20 @@ test('config: defaults without a file, overrides merge, and mistakes are rejecte
   assert.throws(() => resolveConfig({ bots: { '../x': { provider: 'claude' } } }), /名字/);
   assert.throws(() => resolveConfig({ bots: { all: { provider: 'claude' } }, defaultWriter: 'all' }), /名字/);
   assert.throws(() => resolveConfig({ bots: { gemini: { provider: 'gemini' } }, defaultWriter: 'gemini' }), /provider/);
-  assert.throws(() => resolveConfig({ bots: { chatgpt: { provider: 'codex', effort: 'low' } }, defaultWriter: 'chatgpt' }), /effort/);
+  assert.equal(resolveConfig({ bots: { chatgpt: { provider: 'codex', model: 'gpt-6-luna', effort: 'low' } }, defaultWriter: 'chatgpt' }).bots.chatgpt.effort, 'low');
+  // These end up as CLI arguments, and for Codex inside a TOML string.
+  assert.throws(() => resolveConfig({ bots: { chatgpt: { provider: 'codex', effort: 'low" x="1' } }, defaultWriter: 'chatgpt' }), /effort 必须是/);
+  assert.throws(() => resolveConfig({ bots: { claude: { provider: 'claude', model: 'son net' } } }), /model 必须是/);
   assert.throws(() => resolveConfig({ bots: { chatgpt: { provider: 'codex' } } }), /defaultWriter/);
   assert.throws(() => resolveConfig({ requireSubscription: 'no' }), /requireSubscription/);
+  assert.deepEqual(resolveConfig({ compact: { keepRounds: 5 } }).compact, { ...DEFAULT_CONFIG.compact, keepRounds: 5 });
+  // Claude's default model and effort do not follow a switch to Codex.
+  assert.deepEqual(resolveConfig({ compact: { provider: 'codex' } }).compact, { provider: 'codex', thresholdTokens: 40_000, keepRounds: 3, maxSummaryTokens: 4_000 });
+  assert.throws(() => resolveConfig({ compact: { treshold: 1 } }), /compact 里有不认识的配置项：treshold/);
+  assert.throws(() => resolveConfig({ compact: { keepRounds: 0 } }), /compact\.keepRounds/);
+  assert.equal(resolveConfig({ compact: { provider: 'codex', effort: 'low' } }).compact.effort, 'low');
+  assert.throws(() => resolveConfig({ compact: { effort: 'lo w' } }), /compact\.effort/);
+  assert.throws(() => resolveConfig({ compact: { maxSummaryTokens: 50_000 } }), /maxSummaryTokens 必须小于/);
 });
 
 test('config.example.yaml is valid and spells out exactly the defaults', async () => {

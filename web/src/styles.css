@@ -100,6 +100,7 @@ button:disabled { cursor: default; opacity: 0.5; }
 .who { margin-bottom: 3px; font-size: 13px; font-weight: 600; }
 .meta { margin: 2px 4px 0; color: var(--muted); font-size: 12px; font-weight: 400; }
 .who .meta { margin-left: 8px; }
+.who .model { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; overflow-wrap: anywhere; }
 .bubble { max-width: min(100%, 720px); padding: 9px 14px; border-radius: 14px; overflow-wrap: anywhere; }
 .row.user .bubble { background: var(--user); color: var(--user-text); white-space: pre-wrap; border-bottom-right-radius: 4px; }
 .row.bot .bubble { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--tone); border-bottom-left-radius: 4px; }
@@ -143,6 +144,12 @@ button:disabled { cursor: default; opacity: 0.5; }
 .queue-actions button { padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font-size: 13px; }
 .queue-actions .danger { color: var(--danger); }
 
+/* Model pickers */
+.pickers { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 24px 0; font-size: 13px; }
+.picker { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.picker-name { color: var(--muted); font-weight: 600; }
+.picker select { max-width: 180px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font-size: 13px; }
+
 /* Composer */
 .composer { display: flex; align-items: flex-end; gap: 8px; padding: 12px 24px 18px; }
 .composer textarea { flex: 1; min-width: 0; max-height: 40vh; padding: 9px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); resize: none; line-height: 22px; overflow-y: hidden; }
@@ -156,7 +163,8 @@ button:disabled { cursor: default; opacity: 0.5; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--line); max-height: 38vh; }
   .brand { padding: 10px 16px 6px; font-size: 17px; }
   .bots { display: none; }
-  .chat-header, .composer { padding-left: 16px; padding-right: 16px; }
+  .chat-header, .composer, .pickers { padding-left: 16px; padding-right: 16px; }
+  .picker select { max-width: 130px; }
   .messages { padding: 16px 16px 8px; }
   .queue { margin: 0 16px; }
   .queue li { flex-direction: column; gap: 4px; }

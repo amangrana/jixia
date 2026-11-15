@@ -11,7 +11,27 @@ import type { MemoryRequest } from './memory.ts';
 
 export type Provider = 'claude' | 'codex';
 export type { MemoryRequest };
-export type BotOutput = { reply: string; memoryRequests: MemoryRequest[] };
+/** `model` and `effort` say what answered; they are added by runCli, never taken from the bot's own output. */
+export type BotOutput = { reply: string; memoryRequests: MemoryRequest[]; model?: string; effort?: string };
+
+/** Shown when no model was configured and the CLI does not report which one it used. */
+export const DEFAULT_MODEL_LABEL = '默认模型';
+
+/**
+ * The model that answered. Claude Code reports it per call; when it lists
+ * several (a small model can do side work), the one that wrote the most output
+ * is the answer's. Codex does not report it, so that is the configured model.
+ */
+export function usedModel(provider: Provider, stdout: string, configured: string | undefined): string {
+  if (provider === 'claude') {
+    try {
+      const usage = (JSON.parse(stdout) as { modelUsage?: Record<string, { outputTokens?: number }> }).modelUsage ?? {};
+      const [name] = Object.entries(usage).sort((a, b) => (b[1]?.outputTokens ?? 0) - (a[1]?.outputTokens ?? 0))[0] ?? [];
+      if (name) return name;
+    } catch { /* fall through to what was configured */ }
+  }
+  return configured ?? DEFAULT_MODEL_LABEL;
+}
 
 export type CliConfig = {
   provider: Provider;
@@ -22,7 +42,6 @@ export type CliConfig = {
   timeoutMs: number;
   executable?: string;
   model?: string;
-  /** Claude Code only; the Codex equivalent has not been probed yet. */
   effort?: string;
   env?: NodeJS.ProcessEnv;
 };
@@ -102,6 +121,8 @@ export function buildArgs(config: CliConfig, files: { schema: string; final: str
     '-c', 'project_doc_max_bytes=0',
     '--skip-git-repo-check', '--sandbox', 'read-only', '--ephemeral',
     ...(config.model ? ['--model', config.model] : []),
+    // The value is TOML; callers only pass plain tokens (see MODEL_TOKEN), so quoting it is enough.
+    ...(config.effort ? ['-c', `model_reasoning_effort="${config.effort}"`] : []),
     '--json',
     '--output-schema', files.schema,
     '--output-last-message', files.final,
@@ -223,7 +244,8 @@ export async function runCli(config: CliConfig, prompt: string): Promise<BotOutp
     // still held the pipes. Its answer is complete, so use it.
     if (result.exitCode !== 0) throw new CliError('exit', `${NAME[config.provider]} 异常退出（退出码 ${result.exitCode}）`, tail(result.stderr || result.stdout));
     const final = config.provider === 'codex' ? await readFile(files.final, 'utf8').catch(() => undefined) : undefined;
-    return parseOutput(config.provider, result.stdout, final);
+    const output = parseOutput(config.provider, result.stdout, final);
+    return { ...output, model: usedModel(config.provider, result.stdout, config.model), ...(config.effort ? { effort: config.effort } : {}) };
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }

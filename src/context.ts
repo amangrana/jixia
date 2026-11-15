@@ -21,9 +21,22 @@ export function parseSummary(text: string): Summary {
   return { coveredThroughSeq: Number(match[1]), body: text.slice(match[0].length).trim() };
 }
 
+// A summary that does not line up with the history would silently drop or
+// duplicate part of the conversation, so it is refused like a missing header.
+export function checkSummary(summary: Summary, history: readonly ChatMessage[]): void {
+  const covered = summary.coveredThroughSeq;
+  if (covered === 0) return;
+  if (!summary.body) throw new Error(`摘要文件声明覆盖到 seq ${covered}，但正文是空的`);
+  const last = history.at(-1)?.seq ?? 0;
+  if (covered > last) throw new Error(`摘要文件声明覆盖到 seq ${covered}，但聊天记录只到 seq ${last}`);
+  // Rounds are compressed whole: the first message after the boundary must open a round.
+  const next = history.find(message => message.seq > covered);
+  if (next && next.type !== 'user') throw new Error(`摘要文件的 coveredThroughSeq（${covered}）不在一轮的末尾`);
+}
+
 // One JSON object per line. JSON keeps a message that quotes another message
 // from being mistaken for a real one.
-function renderMessage(message: ChatMessage): string {
+export function renderMessage(message: ChatMessage): string {
   if (message.type === 'failure') return JSON.stringify({ seq: message.seq, from: message.from, failed: true });
   // Notices come from the app ("system"), so bots know which memory writes went through.
   return JSON.stringify({ seq: message.seq, from: message.from, content: message.content });
@@ -97,6 +110,8 @@ export function createPreparer(sources: ContextSources): Prepare {
       Promise.allSettled(message.targets.map(bot => readOptional(sources.selfPath(bot)))),
     ]);
     const summary = parseSummary(summaryText);
+    try { checkSummary(summary, history); }
+    catch (error) { throw new Error(`${(error as Error).message}。请修正或删除 ${sources.summaryPath}（删除后改用全部原文）`); }
     const writer = designatedWriter(message.targets, sources.defaultWriter);
     return Object.fromEntries(message.targets.map((bot, index) => {
       const self = selves[index];

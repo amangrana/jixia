@@ -27,11 +27,23 @@ const bot = (name, delay) => async ({ message }) => {
   if (text.includes('格式')) return '## 小结\n\n两种方案的对比：\n\n| 方案 | 优点 | 缺点 |\n| --- | --- | --- |\n| 事件日志 | 单一事实来源 | 不直接可读 |\n| 两个文件 | 直观 | 有崩溃窗口 |\n\n- 第一点，带 `行内代码`\n- 第二点\n\n```ts\nconst retries = 2;\nawait scheduler.runUntilIdle();\n```\n\n> 引用：以磁盘上的事件为准。';
   return `我是 ${name}。你说的是：“${text}”`;
 };
+// Like the real adapter: the answer says which model and effort produced it.
+// `fallback` stands for what the CLI would pick when the group chose nothing.
+const named = (run, fallback) => async input => {
+  const output = await run(input);
+  return { ...(typeof output === 'string' ? { reply: output } : output), model: input.model ?? fallback, ...(input.effort ? { effort: input.effort } : {}) };
+};
+// A small made-up catalog, shaped like the startup query's result. chatgpt's carries a note, as after a failed query.
+const MODELS = {
+  claude: { models: [{ id: 'fable', name: 'Fable 5.2', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { id: 'sonnet', name: 'Sonnet 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5', efforts: [] }], defaultEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  codex: { models: [{ id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] }, { id: 'gpt-6-luna', name: 'GPT-6-Luna', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }], defaultEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], note: 'Codex 的模型列表没有更新（模拟），沿用 2026-11-14 查到的列表' },
+};
 const config = resolveConfig({});
 const groups = await Groups.open({
   root, config,
   logins: Object.fromEntries(Object.keys(config.bots).map(name => [name, { kind: 'subscription', detail: '模拟 bot' }])),
-  bots: { claude: bot('claude', 900), chatgpt: bot('chatgpt', 1800) },
+  bots: { claude: named(bot('claude', 900), 'claude-fable-5-2'), chatgpt: named(bot('chatgpt', 1800), '默认模型') },
+  models: MODELS,
 });
 const server = await startServer({ groups, port: Number(process.argv[2] ?? 4599), staticDir: join(project, 'web', 'dist') });
 console.log(`jixia UI (mock bots): http://127.0.0.1:${server.port}`);

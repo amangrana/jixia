@@ -3,8 +3,8 @@ import type { FormEvent, KeyboardEvent } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api, ApiError } from './api.ts';
-import { appendToDraft, counters, groupState, initialState, reducer } from './state.ts';
-import type { BotStatus, ChatMessage, GroupState, PendingMessage, ServerEvent, State } from './state.ts';
+import { appendToDraft, counters, effortsFor, groupState, initialState, reducer, withModel } from './state.ts';
+import type { BotStatus, ChatMessage, Choice, GroupState, PendingMessage, Selection, ServerEvent, State } from './state.ts';
 
 // Unsent text per group. Kept in this browser so a reload does not lose it.
 const DRAFTS_KEY = 'jixia.drafts';
@@ -261,12 +261,51 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder }: {
           </ol>
         </section>
       )}
+      <ModelPickers bots={bots} selection={group.selection} disabled={!group.loaded} onPick={async (bot, choice) => {
+        // The backend's push updates the dropdowns; a refusal leaves them as they were.
+        try { await api.select(id, bot, choice); } catch (error) { toast(errorText(error)); }
+      }} />
       <form className="composer" onSubmit={event => { event.preventDefault(); void send(); }}>
         <textarea ref={input} value={draft} onChange={event => setDraft(() => event.target.value)} onKeyDown={onKeyDown} rows={1}
           placeholder={group.round ? '可以继续发，消息会排队' : '发消息，Enter 发送'} title="Enter 发送，Shift+Enter 换行" aria-label="消息" />
         <button type="submit" disabled={!draft.trim()}>发送</button>
       </form>
     </>
+  );
+}
+
+// One model and one effort dropdown per usable bot. The choice belongs to the
+// group and applies to every round that starts after it, queued messages included.
+function ModelPickers({ bots, selection, disabled, onPick }: { bots: BotStatus[]; selection: Selection; disabled: boolean; onPick: (bot: string, choice: Choice) => void }) {
+  const usable = bots.filter(bot => bot.enabled);
+  if (!usable.length) return null;
+  return (
+    <div className="pickers" aria-label="每个 bot 用的模型">
+      {usable.map(bot => {
+        const choice = selection[bot.name] ?? {};
+        const efforts = effortsFor(bot.models, choice.model);
+        // A saved choice that is no longer in the list stays visible instead of silently showing "默认".
+        const unlisted = choice.model !== undefined && !bot.models.models.some(model => model.id === choice.model);
+        const strayEffort = choice.effort !== undefined && !efforts.includes(choice.effort);
+        return (
+          <span key={bot.name} className="picker" title={bot.models.note}>
+            <span className="picker-name">{bot.name}{bot.models.note ? ' ⚠' : ''}</span>
+            <select aria-label={`${bot.name} 的模型`} disabled={disabled} value={choice.model ?? ''}
+              onChange={event => onPick(bot.name, withModel(bot.models, choice, event.target.value || undefined))}>
+              <option value="">默认模型</option>
+              {unlisted && <option value={choice.model}>{choice.model}</option>}
+              {bot.models.models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
+            </select>
+            <select aria-label={`${bot.name} 的 effort`} disabled={disabled || (!efforts.length && !strayEffort)} value={choice.effort ?? ''}
+              onChange={event => onPick(bot.name, { ...(choice.model === undefined ? {} : { model: choice.model }), ...(event.target.value ? { effort: event.target.value } : {}) })}>
+              <option value="">默认 effort</option>
+              {strayEffort && <option value={choice.effort}>{choice.effort}</option>}
+              {efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
+            </select>
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -280,7 +319,11 @@ function Message({ message, botIndex }: { message: ChatMessage; botIndex: number
   );
   return (
     <div className={`row bot tone-${botIndex % 4}`}>
-      <div className="who">{message.from}<span className="meta">{clock(message.ts)}</span></div>
+      <div className="who">
+        {message.from}
+        {message.model && <span className="meta model" title="回答这条消息的模型">{message.model}{message.effort ? ` · ${message.effort}` : ''}</span>}
+        <span className="meta">{clock(message.ts)}</span>
+      </div>
       {message.type === 'failure'
         ? <div className="bubble failed"><strong>回答失败</strong>{message.content}</div>
         : <div className="bubble markdown"><Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown></div>}

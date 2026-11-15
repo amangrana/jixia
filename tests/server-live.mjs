@@ -35,7 +35,7 @@ try {
   while (!events.some(e => e.type === 'round' && e.round === null) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
   socket.terminate();
   const pushed = events.filter(e => e.type === 'message').map(e => e.message);
-  for (const message of pushed) console.log(JSON.stringify({ seq: message.seq, from: message.from, type: message.type, content: message.content }));
+  for (const message of pushed) console.log(JSON.stringify({ seq: message.seq, from: message.from, type: message.type, model: message.model, content: message.content }));
   const state = await fetch(`${base}/api/groups/${group.id}`).then(r => r.json());
   const status = await fetch(`${base}/api/status`).then(r => r.json());
   const checks = {
@@ -44,6 +44,8 @@ try {
     'the round finished and was pushed over the WebSocket': events.some(e => e.type === 'round' && e.round === null),
     'claude answered': pushed.some(m => m.from === 'claude' && m.type === 'reply' && m.content.trim()),
     'chatgpt answered': pushed.some(m => m.from === 'chatgpt' && m.type === 'reply' && m.content.trim()),
+    'claude\'s answer names the model Claude Code reported': /^claude-/.test(pushed.find(m => m.from === 'claude')?.model ?? ''),
+    'chatgpt\'s answer says the default model was used': pushed.find(m => m.from === 'chatgpt')?.model === '默认模型',
     'the HTTP state matches what was pushed': JSON.stringify(state.records) === JSON.stringify([...pushed].sort((a, b) => a.seq - b.seq)) && state.round === null && state.queue.length === 0,
   };
   for (const [name, ok] of Object.entries(checks)) { failed ||= !ok; console.log(`${ok ? 'PASS' : 'FAIL'} ${name}`); }

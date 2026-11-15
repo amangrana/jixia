@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendToDraft, counters, groupState, initialState, mergeRecords, reducer } from '../web/src/state.ts';
+import { appendToDraft, counters, effortsFor, groupState, initialState, mergeRecords, reducer, withModel } from '../web/src/state.ts';
 import type { Action, ChatMessage, State } from '../web/src/state.ts';
 
 const msg = (seq: number, from = 'user', type: ChatMessage['type'] = from === 'user' ? 'user' : 'reply'): ChatMessage => ({ seq, id: `id-${seq}`, ts: '2026-11-15T00:00:00.000Z', from, type, content: `c${seq}` });
@@ -15,7 +15,7 @@ test('records merge by seq, whichever way they arrive', () => {
   // Pushed before the snapshot, then contained in the snapshot, then pushed again after a reconnect.
   state = run(state,
     { type: 'event', event: { group: 'a', type: 'message', message: msg(2, 'claude') } },
-    { type: 'snapshot', id: 'a', snapshot: snapshot([msg(1), msg(2, 'claude')]), seen: { queueEvents: 0, roundEvents: 0 } },
+    { type: 'snapshot', id: 'a', snapshot: snapshot([msg(1), msg(2, 'claude')]), seen: { queueEvents: 0, roundEvents: 0, selectionEvents: 0 } },
     { type: 'event', event: { group: 'a', type: 'message', message: msg(2, 'claude') } },
     { type: 'event', event: { group: 'a', type: 'message', message: msg(3, 'chatgpt') } });
   assert.deepEqual(groupState(state, 'a').records.map(m => m.seq), [1, 2, 3]);
@@ -40,7 +40,7 @@ test('a snapshot that was requested before a newer push does not undo that push'
 
 test('older pages go in front, and a reconnect snapshot keeps them', () => {
   let state = run(initialState, { type: 'groups', groups }, { type: 'select', id: 'a' },
-    { type: 'snapshot', id: 'a', snapshot: snapshot([msg(5), msg(6)], { hasMore: true }), seen: { queueEvents: 0, roundEvents: 0 } },
+    { type: 'snapshot', id: 'a', snapshot: snapshot([msg(5), msg(6)], { hasMore: true }), seen: { queueEvents: 0, roundEvents: 0, selectionEvents: 0 } },
     { type: 'older', id: 'a', records: [msg(3), msg(4)], hasMore: true },
     { type: 'older', id: 'a', records: [msg(1), msg(2)], hasMore: false });
   assert.deepEqual([groupState(state, 'a').records.map(m => m.seq), groupState(state, 'a').hasMore], [[1, 2, 3, 4, 5, 6], false]);
@@ -80,4 +80,27 @@ test('text restored from the queue is appended to the draft, never replacing it'
   assert.equal(appendToDraft('', '排队的原文'), '排队的原文');
   assert.equal(appendToDraft('  \n', '排队的原文'), '排队的原文');
   assert.equal(appendToDraft('正在写的草稿  ', '排队的原文'), '正在写的草稿\n排队的原文');
+});
+
+test('effort choices follow the chosen model, and an effort the new model lacks goes back to the default', () => {
+  const list = { models: [{ id: 'big', name: 'Big', efforts: ['low', 'high', 'ultra'] }, { id: 'small', name: 'Small', efforts: ['low'] }, { id: 'plain', name: 'Plain', efforts: [] }], defaultEfforts: ['low', 'high'] };
+  assert.deepEqual(effortsFor(list, undefined), ['low', 'high']);
+  assert.deepEqual(effortsFor(list, 'big'), ['low', 'high', 'ultra']);
+  assert.deepEqual(effortsFor(list, 'gone'), []);
+  assert.deepEqual(withModel(list, { model: 'big', effort: 'low' }, 'small'), { model: 'small', effort: 'low' });
+  assert.deepEqual(withModel(list, { model: 'big', effort: 'ultra' }, 'small'), { model: 'small' });
+  assert.deepEqual(withModel(list, { model: 'big', effort: 'ultra' }, undefined), {});
+  assert.deepEqual(withModel(list, { model: 'big', effort: 'high' }, undefined), { effort: 'high' });
+  assert.deepEqual(withModel(list, { effort: 'low' }, 'plain'), { model: 'plain' });
+});
+
+test('the model choice comes with the snapshot, follows pushes, and a stale snapshot does not undo a push', () => {
+  let state = reducer(initialState, { type: 'snapshot', id: 'a', snapshot: { ...snapshot([]), selection: { claude: { model: 'sonnet' } } }, seen: counters(initialState, 'a') });
+  assert.deepEqual(groupState(state, 'a').selection, { claude: { model: 'sonnet' } });
+  const seen = counters(state, 'a'); // A request leaves now...
+  state = reducer(state, { type: 'event', event: { group: 'a', type: 'selection', selection: { claude: { model: 'opus', effort: 'high' } } } });
+  // ...and comes back with what was true before the change.
+  state = reducer(state, { type: 'snapshot', id: 'a', snapshot: { ...snapshot([]), selection: { claude: { model: 'sonnet' } } }, seen });
+  assert.deepEqual(groupState(state, 'a').selection, { claude: { model: 'opus', effort: 'high' } });
+  assert.deepEqual(groupState(state, 'b').selection, {});
 });

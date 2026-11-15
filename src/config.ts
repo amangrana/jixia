@@ -1,9 +1,15 @@
 import { readFile } from 'node:fs/promises';
 import { parse } from 'yaml';
+import { MODEL_TOKEN } from './models.ts';
 import type { Provider } from './cli.ts';
 
 export type BotConfig = { provider: Provider; model?: string; effort?: string };
+export type CompactConfig = {
+  provider: Provider; model?: string; effort?: string;
+  thresholdTokens: number; keepRounds: number; maxSummaryTokens: number;
+};
 export type Config = {
+  compact: CompactConfig;
   port: number;
   bots: Record<string, BotConfig>;
   defaultWriter: string;
@@ -25,6 +31,7 @@ export const DEFAULT_CONFIG: Config = {
   maxMessageTokens: 30_000,
   maxMemoryTokens: 8_000,
   requireSubscription: true,
+  compact: { provider: 'claude', model: 'sonnet', effort: 'low', thresholdTokens: 40_000, keepRounds: 3, maxSummaryTokens: 4_000 },
 };
 
 // Bot names become file names (memory/<name>.md) and @ mentions, so keep them plain.
@@ -51,11 +58,30 @@ export function resolveConfig(raw: unknown): Config {
     const extra = Object.keys(bot).filter(key => !['provider', 'model', 'effort'].includes(key));
     if (extra.length) throw new Error(`config.yaml：bot ${name} 有不认识的配置项：${extra.join('、')}`);
     if (bot.provider !== 'claude' && bot.provider !== 'codex') throw new Error(`config.yaml：bot ${name} 的 provider 只能是 claude 或 codex`);
-    for (const key of ['model', 'effort'] as const) if (bot[key] !== undefined && typeof bot[key] !== 'string') throw new Error(`config.yaml：bot ${name} 的 ${key} 必须是字符串`);
-    if (bot.effort !== undefined && bot.provider !== 'claude') throw new Error(`config.yaml：bot ${name} 的 effort 目前只支持 claude`);
+    for (const key of ['model', 'effort'] as const) if (bot[key] !== undefined && (typeof bot[key] !== 'string' || !MODEL_TOKEN.test(bot[key]))) throw new Error(`config.yaml：bot ${name} 的 ${key} 必须是模型或档位的名称，只含字母、数字和 . _ : - [ ]`);
   }
+  config.compact = resolveCompact(input.compact);
+  if (config.compact.maxSummaryTokens >= config.compact.thresholdTokens) throw new Error('config.yaml：compact.maxSummaryTokens 必须小于 compact.thresholdTokens');
   if (!(config.defaultWriter in config.bots)) throw new Error(`config.yaml：defaultWriter“${config.defaultWriter}”不在 bots 里`);
   return config;
+}
+
+function resolveCompact(raw: unknown): CompactConfig {
+  const defaults = structuredClone(DEFAULT_CONFIG.compact);
+  if (raw === undefined || raw === null) return defaults;
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config.yaml：compact 必须是键值对');
+  const input = raw as Record<string, unknown>;
+  const unknown = Object.keys(input).filter(key => !(key in defaults));
+  if (unknown.length) throw new Error(`config.yaml：compact 里有不认识的配置项：${unknown.join('、')}`);
+  // The default model and effort are Claude's; they must not follow a switch to Codex.
+  if (input.provider === 'codex') { delete defaults.model; delete defaults.effort; }
+  const compact = { ...defaults, ...input } as CompactConfig;
+  if (compact.provider !== 'claude' && compact.provider !== 'codex') throw new Error('config.yaml：compact.provider 只能是 claude 或 codex');
+  for (const key of ['model', 'effort'] as const) if (compact[key] !== undefined && (typeof compact[key] !== 'string' || !MODEL_TOKEN.test(compact[key]))) throw new Error(`config.yaml：compact.${key} 必须是模型或档位的名称，只含字母、数字和 . _ : - [ ]`);
+  for (const key of ['thresholdTokens', 'keepRounds', 'maxSummaryTokens'] as const) {
+    if (!Number.isInteger(compact[key]) || compact[key] < 1) throw new Error(`config.yaml：compact.${key} 必须是正整数`);
+  }
+  return compact;
 }
 
 /** A missing file means defaults. */
