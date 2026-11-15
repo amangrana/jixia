@@ -1,4 +1,6 @@
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { extname, join, resolve, sep } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
@@ -52,7 +54,33 @@ const pageSize = (value: string | null) => {
 
 export type RunningServer = { port: number; close: () => Promise<void> };
 
-export async function startServer(options: { groups: Groups; port: number }): Promise<RunningServer> {
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2', '.map': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8',
+};
+
+// The built web page. Anything that is not a file falls back to index.html.
+async function serveStatic(staticDir: string | undefined, pathname: string, response: ServerResponse): Promise<void> {
+  const plain = (status: number, text: string) => { response.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); response.end(text); };
+  if (!staticDir) return plain(404, 'jixia 后端正在运行，但没有配置网页目录。');
+  const base = resolve(staticDir);
+  let relative: string;
+  try { relative = decodeURIComponent(pathname); } catch { return plain(400, '地址格式不对'); }
+  let file = resolve(base, '.' + relative);
+  // A request may only ever reach files inside the build folder.
+  if (file !== base && !file.startsWith(base + sep)) return plain(403, '不允许访问');
+  let content: Buffer | undefined;
+  if (file !== base) content = await readFile(file).catch(() => undefined);
+  if (!content) { file = join(base, 'index.html'); content = await readFile(file).catch(() => undefined); }
+  if (!content) return plain(404, '网页还没有构建。先运行 npm run build，再刷新这个页面。');
+  // Vite puts a content hash in asset file names, so those can be cached for good.
+  const cache = relative.startsWith('/assets/') && !file.endsWith('index.html') ? 'public, max-age=31536000, immutable' : 'no-cache';
+  response.writeHead(200, { 'content-type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream', 'content-length': content.length, 'cache-control': cache });
+  response.end(content);
+}
+
+export async function startServer(options: { groups: Groups; port: number; staticDir?: string }): Promise<RunningServer> {
   const { groups } = options;
 
   async function route(request: IncomingMessage, url: URL): Promise<{ status?: number; body: unknown }> {
@@ -122,6 +150,11 @@ export async function startServer(options: { groups: Groups; port: number }): Pr
   const server = createServer((request, response) => {
     if (!allowed(request)) { send(response, 403, { error: '只接受来自本机页面的请求', code: 'forbidden' }); return; }
     const url = new URL(request.url ?? '/', 'http://localhost');
+    if (url.pathname !== '/api' && !url.pathname.startsWith('/api/')) {
+      if (request.method !== 'GET' && request.method !== 'HEAD') { send(response, 405, { error: '不支持这个方法', code: 'bad-request' }); return; }
+      serveStatic(options.staticDir, url.pathname, response).catch(() => { if (!response.headersSent) response.writeHead(500); response.end(); });
+      return;
+    }
     route(request, url).then(result => send(response, result.status ?? 200, result.body), error => { const { status, body } = failure(error); send(response, status, body); });
   });
 

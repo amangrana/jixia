@@ -19,6 +19,6 @@ for (const [name, bot] of Object.entries(config.bots)) {
 }
 
 const groups = await Groups.open({ root, config, logins });
-const server = await startServer({ groups, port: config.port });
-console.log(`jixia 后端已启动：http://127.0.0.1:${server.port}`);
+const server = await startServer({ groups, port: config.port, staticDir: join(root, 'web', 'dist') });
+console.log(`jixia 已启动，在浏览器里打开：http://127.0.0.1:${server.port}`);
 for (const bot of groups.bots) console.log(`  ${bot.name}（${bot.provider}）：${bot.enabled ? '已启用' : '未启用'}，${bot.login.detail}`);

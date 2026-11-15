@@ -7,3 +7,8 @@ data/
 .memory-test-*/
 .server-test-*/
 .live-data-*/
+
+# Built web page; run npm run build.
+web/dist/
+# Local preview launcher with machine-specific paths.
+.claude/launch.json

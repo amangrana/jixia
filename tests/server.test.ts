@@ -177,6 +177,41 @@ test('a bot whose CLI is not on a subscription login is never started, and says 
   assert.match(records.find((r: Json) => r.from === 'chatgpt').content, /requireSubscription/);
 });
 
+test('the built web page is served next to the API, and nothing outside its folder', async t => {
+  const root = await mkdtemp(join(process.cwd(), '.server-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'prompts'));
+  await writeFile(join(root, 'prompts', 'system.md'), 'SECRET-OUTSIDE-DIST');
+  await mkdir(join(root, 'dist', 'assets'), { recursive: true });
+  await writeFile(join(root, 'dist', 'index.html'), '<!doctype html><title>jixia</title>');
+  await writeFile(join(root, 'dist', 'assets', 'app-abc123.js'), 'console.log("页面")');
+  const groups = await Groups.open({ root, config: resolveConfig({}), logins: {}, bots: { claude: echo('claude'), chatgpt: echo('chatgpt') } });
+  const withPage = await startServer({ groups, port: 0, staticDir: join(root, 'dist') });
+  const bare = await startServer({ groups, port: 0, staticDir: join(root, 'not-built') });
+  t.after(async () => { await withPage.close(); await bare.close(); });
+  const get = async (server: { port: number }, path: string, method = 'GET') => {
+    const response = await fetch(`http://127.0.0.1:${server.port}${path}`, { method });
+    return { status: response.status, type: response.headers.get('content-type') ?? '', cache: response.headers.get('cache-control'), text: await response.text() };
+  };
+  const home = await get(withPage, '/');
+  assert.deepEqual([home.status, home.type, home.cache], [200, 'text/html; charset=utf-8', 'no-cache']);
+  assert.match(home.text, /<title>jixia<\/title>/);
+  const script = await get(withPage, '/assets/app-abc123.js');
+  assert.deepEqual([script.status, script.type, script.text], [200, 'text/javascript; charset=utf-8', 'console.log("页面")']);
+  assert.match(script.cache!, /immutable/);
+  // Unknown paths get the page, never a file from outside the build folder.
+  for (const path of ['/some/page', '/..%2Fprompts%2Fsystem.md', '/%2e%2e/prompts/system.md', '/assets/..%5C..%5Cprompts%5Csystem.md']) {
+    const got = await get(withPage, path);
+    assert(!got.text.includes('SECRET-OUTSIDE-DIST'), path);
+    assert([200, 403].includes(got.status), path);
+  }
+  assert.equal((await get(withPage, '/', 'POST')).status, 405);
+  assert.equal((await get(withPage, '/api/groups')).type, 'application/json; charset=utf-8');
+  const missing = await get(bare, '/');
+  assert.equal(missing.status, 404);
+  assert.match(missing.text, /npm run build/);
+});
+
 test('memory written in one group is announced there and visible to another group', async t => {
   const prompts: string[] = [];
   const app = await start(t, { bots: { claude: async input => { prompts.push(input.prompt!); return input.message.id === 'remember' ? { reply: '好', memoryRequests: [{ target: 'common', op: 'append', content: '喜欢乌龙茶' }] } : '嗯'; } }, config: { bots: { claude: { provider: 'claude' } } } });
