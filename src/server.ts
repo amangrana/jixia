@@ -117,7 +117,9 @@ export async function startServer(options: { groups: Groups; port: number; stati
     }
     if (is('PUT', 'api', 'groups', null, 'models', null)) {
       const body = await readJson(request);
-      return { body: { selection: await groups.select(id, parts[4], { model: body.model, effort: body.effort }) } };
+      // Only the fields sent are changed; see Groups.select.
+      const change = Object.fromEntries((['model', 'effort'] as const).filter(key => key in body).map(key => [key, body[key]]));
+      return { body: { selection: await groups.select(id, parts[4], change) } };
     }
     if (is('GET', 'api', 'groups', null, 'records')) {
       const before = Number(url.searchParams.get('before'));

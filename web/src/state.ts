@@ -11,6 +11,8 @@ export type BotStatus = { name: string; provider: string; enabled: boolean; logi
 /** What each bot is asked to use in a group. A missing field means the CLI decides. */
 export type Choice = { model?: string; effort?: string };
 export type Selection = Record<string, Choice>;
+/** A change to one bot's choice: only the fields given change; null goes back to the CLI default. */
+export type ChoiceChange = { model?: string | null; effort?: string | null };
 
 export type MemoryFile = { name: string; content: string; version: string; tokens: number; limit: number };
 export type QuotaWindow = { usedPercent: number; resetsAt?: string };
@@ -82,6 +84,22 @@ export function mergeRecords(a: readonly ChatMessage[], b: readonly ChatMessage[
   return [...bySeq.values()].sort((x, y) => x.seq - y.seq);
 }
 
+/**
+ * Puts a snapshot's tail together with the records already shown. After a
+ * reconnect the snapshot is only the latest page; older pages already loaded
+ * are kept when they join up with it. When messages were missed in between
+ * (a long disconnect), the older ones are dropped instead, so the list is
+ * one unbroken run and "加载更早的记录" fills in from the snapshot downwards.
+ */
+function joinTail(group: GroupState, snapshot: Snapshot): Pick<GroupState, 'records' | 'hasMore'> {
+  const first = snapshot.records[0]?.seq;
+  if (!group.loaded || first === undefined) return { records: mergeRecords(group.records, snapshot.records), hasMore: group.loaded ? group.hasMore : snapshot.hasMore };
+  const below = group.records.filter(message => message.seq < first);
+  // Joins up: the newest shown record below the snapshot sits right before it.
+  if (!below.length || below.at(-1)!.seq === first - 1) return { records: mergeRecords(group.records, snapshot.records), hasMore: below.length ? group.hasMore : snapshot.hasMore };
+  return { records: mergeRecords(group.records.filter(message => message.seq >= first), snapshot.records), hasMore: snapshot.hasMore };
+}
+
 const withGroup = (state: State, id: string, change: (group: GroupState) => GroupState): State =>
   ({ ...state, byId: { ...state.byId, [id]: change(groupState(state, id)) } });
 
@@ -103,9 +121,7 @@ export function reducer(state: State, action: Action): State {
     case 'snapshot': return withGroup(state, action.id, group => ({
       ...group,
       loaded: true,
-      // After a reconnect the snapshot is only the tail; keep older pages already loaded.
-      records: mergeRecords(group.records, action.snapshot.records),
-      hasMore: group.loaded ? group.hasMore : action.snapshot.hasMore,
+      ...joinTail(group, action.snapshot),
       queue: group.queueEvents === action.seen.queueEvents ? action.snapshot.queue : group.queue,
       round: group.roundEvents === action.seen.roundEvents ? action.snapshot.round : group.round,
       selection: group.selectionEvents === action.seen.selectionEvents && action.snapshot.selection ? action.snapshot.selection : group.selection,
@@ -146,11 +162,6 @@ export function effortsFor(list: ModelList, model: string | undefined): string[]
   return list.models.find(entry => entry.id === model)?.efforts ?? [];
 }
 
-/** The choice after picking a model: an effort the new model does not accept goes back to the default. */
-export function withModel(list: ModelList, current: Choice, model: string | undefined): Choice {
-  const keep = current.effort !== undefined && effortsFor(list, model).includes(current.effort);
-  return { ...(model === undefined ? {} : { model }), ...(keep ? { effort: current.effort } : {}) };
-}
 
 /** Text of the "no choice" entries: the CLI's own default when it says what that is. */
 export function defaultLabels(list: ModelList, choice: Choice): { model: string; effort: string } {

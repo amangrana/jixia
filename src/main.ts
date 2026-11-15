@@ -6,12 +6,28 @@ import { fileURLToPath } from 'node:url';
 import { checkLogin } from './auth.ts';
 import { loadConfig } from './config.ts';
 import { Groups } from './groups.ts';
+import { acquireDataLock, DataLockedError } from './lock.ts';
+import type { DataLock } from './lock.ts';
 import { startServer } from './server.ts';
 import type { LoginStatus } from './auth.ts';
 import type { Provider } from './cli.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const config = await loadConfig(join(root, 'config.yaml'));
+
+// Before anything reads or writes data/: a second instance on the same data
+// would close the first one's running rounds and answer its queue again.
+await mkdir(join(root, 'data'), { recursive: true });
+let lock: DataLock;
+try { lock = await acquireDataLock(join(root, 'data'), { port: config.port }); }
+catch (error) {
+  if (!(error instanceof DataLockedError)) throw error;
+  console.error(error.message);
+  process.exit(1);
+}
+process.on('exit', () => lock.release());
+// Ctrl+C and closing the window end the process without 'exit' unless handled.
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) process.on(signal, () => process.exit(0));
 
 // One check per CLI, shared by every bot that uses it.
 const byProvider = new Map<Provider, Promise<LoginStatus>>();

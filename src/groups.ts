@@ -90,6 +90,8 @@ export class Groups {
   #compactors = new Map<string, ReturnType<typeof createCompactor>>();
   // What was saved for each group. A bot missing from it uses the config default.
   #selections = new Map<string, Selection>();
+  // Per group, the last model change in flight; the next one waits for it.
+  #selecting = new Map<string, Promise<unknown>>();
   #listeners = new Set<(event: AppEvent) => void>();
 
   private constructor(options: GroupsOptions) {
@@ -196,24 +198,52 @@ export class Groups {
   /**
    * Changes what one bot uses in this group. It applies to every round that
    * starts afterwards, messages already queued included; a running round keeps
-   * what it started with. An empty value means "let the CLI decide".
+   * what it started with.
+   *
+   * `change` holds only the fields to change: a name sets it, null or "" goes
+   * back to "let the CLI decide", and a field left out stays as it is. So a
+   * change to the effort cannot undo a change to the model made a moment
+   * earlier from a page that had not heard of it yet. Changes to one group run
+   * one at a time, each on top of the one before.
    */
-  async select(id: string, bot: string, choice: { model?: unknown; effort?: unknown }): Promise<Selection> {
+  select(id: string, bot: string, change: { model?: unknown; effort?: unknown }): Promise<Selection> {
+    this.info(id);
+    const previous = this.#selecting.get(id) ?? Promise.resolve();
+    const result = previous.then(() => this.#applySelection(id, bot, change));
+    const settled = result.catch(() => {});
+    this.#selecting.set(id, settled);
+    // Forget the chain once it is idle, so deleted groups leave nothing behind.
+    void settled.then(() => { if (this.#selecting.get(id) === settled) this.#selecting.delete(id); });
+    return result;
+  }
+
+  async #applySelection(id: string, bot: string, change: { model?: unknown; effort?: unknown }): Promise<Selection> {
     const status = this.#statuses.find(entry => entry.name === bot);
     if (!status || !(bot in this.#bots)) throw new RangeError(`没有名为 ${bot} 的 bot`);
-    const clean = cleanSelection({ [bot]: choice })[bot];
-    if (!clean) throw new RangeError('model 和 effort 必须是模型或档位的名称，或者留空');
+    const current = this.selection(id)[bot];
+    const next: Choice = { ...current };
+    for (const key of ['model', 'effort'] as const) {
+      if (!(key in change)) continue;
+      const value = change[key];
+      if (value === null || value === '' || value === undefined) delete next[key];
+      else if (typeof value === 'string' && MODEL_TOKEN.test(value)) next[key] = value;
+      else throw new RangeError('model 和 effort 必须是模型或档位的名称，或者留空');
+    }
     // Check against the startup list when there is one. Without a list the
     // names cannot be checked here; a wrong one fails when the CLI is called.
     const { models, defaultEfforts } = status.models;
     if (models.length) {
-      const model = clean.model === undefined ? undefined : models.find(entry => entry.id === clean.model);
-      if (clean.model !== undefined && !model) throw new RangeError(`${bot} 的模型列表里没有 ${clean.model}`);
+      const model = next.model === undefined ? undefined : models.find(entry => entry.id === next.model);
+      if (next.model !== undefined && !model) throw new RangeError(`${bot} 的模型列表里没有 ${next.model}`);
       const efforts = model ? model.efforts : defaultEfforts;
-      if (clean.effort !== undefined && !efforts.includes(clean.effort)) throw new RangeError(`${model ? model.id : '默认模型'} 不支持 effort ${clean.effort}`);
+      if (next.effort !== undefined && !efforts.includes(next.effort)) {
+        // An effort asked for in this change is refused; one kept from before
+        // that the newly chosen model does not offer goes back to the default.
+        if ('effort' in change) throw new RangeError(`${model ? model.id : '默认模型'} 不支持 effort ${next.effort}`);
+        delete next.effort;
+      }
     }
-    const next = { ...this.selection(id), [bot]: clean };
-    await this.#saveSelection(id, next);
+    await this.#saveSelection(id, { ...this.selection(id), [bot]: next });
     this.#emit({ group: id, type: 'selection', selection: this.selection(id) });
     return this.selection(id);
   }

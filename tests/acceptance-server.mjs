@@ -16,6 +16,7 @@ import { resolveConfig } from '../src/config.ts';
 import { Groups } from '../src/groups.ts';
 import { loadModels } from '../src/models.ts';
 import { startServer } from '../src/server.ts';
+import { acquireDataLock } from '../src/lock.ts';
 
 // When started from inside another Claude session, that session's variables
 // would be inherited by the CLIs this app starts. A terminal has none of them.
@@ -25,6 +26,10 @@ const project = dirname(dirname(fileURLToPath(import.meta.url)));
 const root = resolve(project, process.argv[3] ?? '.live-data-acceptance');
 await mkdir(join(root, 'prompts'), { recursive: true });
 await mkdir(join(root, 'data', 'work'), { recursive: true });
+// Same protection as src/main.ts: a second copy on this folder would disturb the first.
+const lock = await acquireDataLock(join(root, 'data'), { port: Number(process.argv[2] ?? 4600) });
+process.on('exit', () => lock.release());
+process.on('SIGINT', () => process.exit(0));
 for (const name of ['system.md', 'compact.md']) await copyFile(join(project, 'prompts', name), join(root, 'prompts', name));
 
 const config = resolveConfig({

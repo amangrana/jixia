@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ageText, appendToDraft, completeMention, counters, defaultLabels, effortsFor, groupState, initialState, mentionAt, mentionOptions, mergeRecords, quotaLevel, reducer, resetText, withModel } from '../web/src/state.ts';
+import { ageText, appendToDraft, completeMention, counters, defaultLabels, effortsFor, groupState, initialState, mentionAt, mentionOptions, mergeRecords, quotaLevel, reducer, resetText } from '../web/src/state.ts';
 import type { Action, ChatMessage, State } from '../web/src/state.ts';
 
 const msg = (seq: number, from = 'user', type: ChatMessage['type'] = from === 'user' ? 'user' : 'reply'): ChatMessage => ({ seq, id: `id-${seq}`, ts: '2026-11-15T00:00:00.000Z', from, type, content: `c${seq}` });
@@ -82,16 +82,11 @@ test('text restored from the queue is appended to the draft, never replacing it'
   assert.equal(appendToDraft('正在写的草稿  ', '排队的原文'), '正在写的草稿\n排队的原文');
 });
 
-test('effort choices follow the chosen model, and an effort the new model lacks goes back to the default', () => {
+test('effort choices follow the chosen model', () => {
   const list = { models: [{ id: 'big', name: 'Big', efforts: ['low', 'high', 'ultra'] }, { id: 'small', name: 'Small', efforts: ['low'] }, { id: 'plain', name: 'Plain', efforts: [] }], defaultEfforts: ['low', 'high'] };
   assert.deepEqual(effortsFor(list, undefined), ['low', 'high']);
   assert.deepEqual(effortsFor(list, 'big'), ['low', 'high', 'ultra']);
   assert.deepEqual(effortsFor(list, 'gone'), []);
-  assert.deepEqual(withModel(list, { model: 'big', effort: 'low' }, 'small'), { model: 'small', effort: 'low' });
-  assert.deepEqual(withModel(list, { model: 'big', effort: 'ultra' }, 'small'), { model: 'small' });
-  assert.deepEqual(withModel(list, { model: 'big', effort: 'ultra' }, undefined), {});
-  assert.deepEqual(withModel(list, { model: 'big', effort: 'high' }, undefined), { effort: 'high' });
-  assert.deepEqual(withModel(list, { effort: 'low' }, 'plain'), { model: 'plain' });
 });
 
 test('the model choice comes with the snapshot, follows pushes, and a stale snapshot does not undo a push', () => {
@@ -155,4 +150,21 @@ test('reset times show the time today and the date otherwise; old readings say h
   assert.equal(ageText(new Date(2026, 10, 15, 12, 59, 50).toISOString(), now), '刚才');
   assert.equal(ageText(new Date(2026, 10, 15, 12, 48).toISOString(), now), '12 分钟前');
   assert.equal(ageText(new Date(2026, 10, 15, 10, 30).toISOString(), now), '2 小时前');
+});
+
+test('a reconnect that missed more than one page drops the older records instead of leaving a gap', () => {
+  const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => msg(from + i));
+  let state = reducer(initialState, { type: 'snapshot', id: 'a', snapshot: snapshot(range(1, 5)), seen: counters(initialState, 'a') });
+  // Disconnected while 250 more records were written; the reconnect brings the newest 200.
+  state = reducer(state, { type: 'snapshot', id: 'a', snapshot: snapshot(range(56, 255), { hasMore: true }), seen: counters(state, 'a') });
+  assert.deepEqual([groupState(state, 'a').records[0].seq, groupState(state, 'a').records.at(-1)!.seq, groupState(state, 'a').records.length, groupState(state, 'a').hasMore], [56, 255, 200, true]);
+  // "加载更早的记录" asks for what comes before seq 56 and the list is whole again.
+  state = reducer(state, { type: 'older', id: 'a', records: range(1, 55), hasMore: false });
+  assert.deepEqual(groupState(state, 'a').records.map(m => m.seq), range(1, 255).map(m => m.seq));
+  // A record pushed while the snapshot was on its way is kept when it lies above the snapshot.
+  let racing = reducer(initialState, { type: 'snapshot', id: 'b', snapshot: snapshot(range(1, 5)), seen: counters(initialState, 'b') });
+  const seen = counters(racing, 'b');
+  racing = reducer(racing, { type: 'event', event: { group: 'b', type: 'message', message: msg(256) } });
+  racing = reducer(racing, { type: 'snapshot', id: 'b', snapshot: snapshot(range(56, 255), { hasMore: true }), seen });
+  assert.deepEqual([groupState(racing, 'b').records[0].seq, groupState(racing, 'b').records.at(-1)!.seq, groupState(racing, 'b').records.length], [56, 256, 201]);
 });

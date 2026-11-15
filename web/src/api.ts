@@ -1,4 +1,4 @@
-import type { BotStatus, ChatMessage, Choice, GroupInfo, PendingMessage, MemoryFile, Quotas, Selection, Snapshot } from './state.ts';
+import type { BotStatus, ChatMessage, ChoiceChange, GroupInfo, PendingMessage, MemoryFile, Quotas, Selection, Snapshot } from './state.ts';
 
 /** A refusal from the backend. `code` is stable; `message` is ready to show. */
 export class ApiError extends Error {
@@ -34,6 +34,7 @@ export const api = {
   older: (id: string, before: number) => call<{ records: ChatMessage[]; hasMore: boolean }>('GET', `${group(id)}/records?before=${before}&limit=200`),
   send: (id: string, messageId: string, content: string) => call<{ queued: boolean }>('POST', `${group(id)}/messages`, { id: messageId, content }),
   remove: (id: string, messageId: string) => call<{ message: PendingMessage }>('DELETE', `${group(id)}/queue/${encodeURIComponent(messageId)}`),
-  select: (id: string, bot: string, choice: Choice) => call<{ selection: Selection }>('PUT', `${group(id)}/models/${encodeURIComponent(bot)}`, { model: choice.model ?? null, effort: choice.effort ?? null }),
+  /** Only the fields given are changed; null means "let the CLI decide". */
+  select: (id: string, bot: string, change: ChoiceChange) => call<{ selection: Selection }>('PUT', `${group(id)}/models/${encodeURIComponent(bot)}`, change),
   moveToTop: (id: string, messageId: string) => call<{ queue: PendingMessage[] }>('POST', `${group(id)}/queue/${encodeURIComponent(messageId)}/top`),
 };

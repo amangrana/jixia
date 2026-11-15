@@ -6,7 +6,7 @@
     "start": "node src/main.ts",
     "build": "vite build --config web/vite.config.ts",
     "dev:web": "vite --config web/vite.config.ts",
-    "test": "node --test tests/scheduler.test.ts tests/routing.test.ts tests/cli.test.ts tests/context.test.ts tests/memory.test.ts tests/memory-page.test.ts tests/compact.test.ts tests/models.test.ts tests/quota.test.ts tests/app.test.ts tests/server.test.ts tests/web-state.test.ts"
+    "test": "node --test tests/scheduler.test.ts tests/routing.test.ts tests/cli.test.ts tests/context.test.ts tests/memory.test.ts tests/memory-page.test.ts tests/compact.test.ts tests/models.test.ts tests/quota.test.ts tests/lock.test.ts tests/app.test.ts tests/server.test.ts tests/web-state.test.ts"
   },
   "engines": {
     "node": ">=24"

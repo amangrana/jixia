@@ -349,3 +349,32 @@ test('memory files are listed and saved over HTTP; a stale save gets 409 with th
   assert.equal((await app.api('PUT', '/api/memory/..%2Fx', { content: 'x', baseVersion: 'y' })).status, 400);
   assert.equal((await app.api('PUT', '/api/memory/common', { content: 5, baseVersion: 'y' })).status, 400);
 });
+
+test('model changes to one group run one after another: none is lost, and memory, disk and the last push agree', async t => {
+  const models = { claude: { models: [{ id: 'sonnet', name: 'Sonnet', efforts: ['low', 'high'] }, { id: 'opus', name: 'Opus', efforts: ['low', 'high', 'max'] }, { id: 'haiku', name: 'Haiku', efforts: [] }], defaultEfforts: ['low', 'high'] } };
+  const app = await start(t, { bots: { claude: echo('claude'), chatgpt: echo('chatgpt') }, models: { claude: models.claude, codex: models.claude } });
+  const id = await app.newGroup();
+  const disk = async () => JSON.parse(await readFile(join(app.root, 'data', 'groups', id, 'settings.json'), 'utf8')).models;
+  const lastPush = () => app.events.filter(e => e.group === id && e.type === 'selection').at(-1)?.selection;
+  for (let round = 0; round < 10; round++) {
+    // Two tabs, or quick clicks: changes to two bots at once, then a model and an effort for one bot sent before the first returns.
+    const results = await Promise.all([
+      app.api('PUT', `/api/groups/${id}/models/claude`, { model: round % 2 ? 'opus' : 'sonnet' }),
+      app.api('PUT', `/api/groups/${id}/models/chatgpt`, { model: 'opus' }),
+      app.api('PUT', `/api/groups/${id}/models/chatgpt`, { effort: 'max' }),
+    ]);
+    assert.deepEqual(results.map(r => r.status), [200, 200, 200], JSON.stringify(results.map(r => r.body)));
+    const expected = { claude: { model: round % 2 ? 'opus' : 'sonnet' }, chatgpt: { model: 'opus', effort: 'max' } };
+    assert.deepEqual((await app.api('GET', `/api/groups/${id}`)).body.selection, expected);
+    assert.deepEqual(await disk(), expected);
+    await until(() => JSON.stringify(lastPush()) === JSON.stringify(expected), 'the last push to match');
+    await app.api('PUT', `/api/groups/${id}/models/chatgpt`, { model: null, effort: null });
+  }
+  // Only the fields sent change. A model that does not offer the kept effort drops it;
+  // an effort asked for that the model does not offer is refused.
+  await app.api('PUT', `/api/groups/${id}/models/claude`, { model: 'opus', effort: 'max' });
+  assert.deepEqual((await app.api('PUT', `/api/groups/${id}/models/claude`, { effort: 'low' })).body.selection.claude, { model: 'opus', effort: 'low' });
+  assert.deepEqual((await app.api('PUT', `/api/groups/${id}/models/claude`, { model: 'haiku' })).body.selection.claude, { model: 'haiku' });
+  assert.equal((await app.api('PUT', `/api/groups/${id}/models/claude`, { effort: 'low' })).status, 400);
+  assert.deepEqual((await app.api('PUT', `/api/groups/${id}/models/claude`, {})).body.selection.claude, { model: 'haiku' });
+});
