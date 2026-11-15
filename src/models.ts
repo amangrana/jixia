@@ -24,6 +24,14 @@ export type Catalog = {
   /** The effort the CLI uses when neither model nor effort is given, when it says. */
   defaultEffort?: string;
 };
+/**
+ * The effort the CLI uses for this model when given none, if the startup query
+ * said (Codex does, per model; Claude Code does not). No model means the CLI's default model.
+ */
+export function defaultEffortFor(list: Catalog, model: string | undefined): string | undefined {
+  return model === undefined ? list.defaultEffort : list.models.find(entry => entry.id === model)?.defaultEffort;
+}
+
 /** `note` is set when this start's query failed: the rest is then the last saved list, or empty. */
 export type ModelList = Catalog & { note?: string };
 

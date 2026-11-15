@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_INIT, loadModels, parseClaudeModels, parseCodexModels, queryModels } from '../src/models.ts';
+import { CLAUDE_INIT, defaultEffortFor, loadModels, parseClaudeModels, parseCodexModels, queryModels } from '../src/models.ts';
 import type { OpenRpc, RunQuery } from '../src/models.ts';
 
 // Shapes copied from what the two CLIs returned on this machine. No CLI is started here.
@@ -109,4 +109,14 @@ test('a failed query keeps the last saved list, defaults included, and says so; 
   assert.deepEqual([third.claude.models, third.claude.defaultModel], [[], undefined]);
   assert.match(third.claude.note!, /查不到 Claude Code 的模型列表（not installed），只能用默认模型/);
   assert.deepEqual(third.codex, { models: [], defaultEfforts: [] }); // Not asked for.
+});
+
+test('the default effort to record: the chosen model\'s, or the default model\'s when none is chosen', () => {
+  const codex = parseCodexModels([CODEX_PAGE_1, CODEX_PAGE_2]);
+  assert.equal(defaultEffortFor(codex, undefined), 'low');
+  assert.equal(defaultEffortFor(codex, 'gpt-6-luna'), 'medium');
+  assert.equal(defaultEffortFor(codex, 'not-listed'), undefined);
+  // Claude Code does not say, so nothing is recorded.
+  assert.equal(defaultEffortFor(parseClaudeModels(CLAUDE), undefined), undefined);
+  assert.equal(defaultEffortFor(parseClaudeModels(CLAUDE), 'sonnet'), undefined);
 });

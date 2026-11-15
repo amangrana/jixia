@@ -1,9 +1,11 @@
-import type { BotStatus, ChatMessage, Choice, GroupInfo, PendingMessage, Quotas, Selection, Snapshot } from './state.ts';
+import type { BotStatus, ChatMessage, Choice, GroupInfo, PendingMessage, MemoryFile, Quotas, Selection, Snapshot } from './state.ts';
 
 /** A refusal from the backend. `code` is stable; `message` is ready to show. */
 export class ApiError extends Error {
   code: string;
-  constructor(code: string, message: string) { super(message); this.code = code; }
+  /** The whole refusal, for codes that carry more than a message (memory-changed carries the latest file). */
+  data: Record<string, unknown>;
+  constructor(code: string, message: string, data: Record<string, unknown> = {}) { super(message); this.code = code; this.data = data; }
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -14,7 +16,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     throw new ApiError('offline', '连不上 jixia 后端，请确认它还在运行');
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiError(data.code ?? 'internal', data.error ?? `请求失败（${response.status}）`);
+  if (!response.ok) throw new ApiError(data.code ?? 'internal', data.error ?? `请求失败（${response.status}）`, data);
   return data as T;
 }
 
@@ -22,6 +24,8 @@ const group = (id: string) => `/api/groups/${encodeURIComponent(id)}`;
 export const api = {
   status: () => call<{ bots: BotStatus[] }>('GET', '/api/status'),
   groups: () => call<{ groups: GroupInfo[] }>('GET', '/api/groups'),
+  memory: () => call<{ files: MemoryFile[] }>('GET', '/api/memory'),
+  saveMemory: (name: string, content: string, baseVersion: string) => call<{ file: MemoryFile }>('PUT', `/api/memory/${encodeURIComponent(name)}`, { content, baseVersion }),
   quota: () => call<{ quotas: Quotas }>('GET', '/api/quota'),
   refreshQuota: () => call<{ quotas: Quotas }>('POST', '/api/quota/refresh'),
   createGroup: (name: string) => call<{ group: GroupInfo }>('POST', '/api/groups', { name }),

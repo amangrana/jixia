@@ -189,3 +189,25 @@ button:disabled { cursor: default; opacity: 0.5; }
   .queue { margin: 0 16px; }
   .queue li { flex-direction: column; gap: 4px; }
 }
+
+/* Memory page */
+.brand-row { display: flex; align-items: center; justify-content: space-between; padding-right: 12px; }
+.memory-button { padding: 3px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font-size: 13px; }
+.memory-button.active { border-color: var(--accent); color: var(--accent); }
+.memory-page { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.memory-close { flex: none; margin-left: auto; padding: 3px 10px; border: 1px solid var(--line); border-radius: 6px; background: none; font-size: 13px; }
+.memory-tabs { display: flex; gap: 4px; padding: 10px 24px 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.memory-tabs button { flex: none; padding: 6px 14px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); }
+.memory-tabs button.active { border-bottom-color: var(--accent); color: var(--text); font-weight: 600; }
+.memory-page .banner button { margin-left: 8px; padding: 2px 10px; border: 1px solid currentColor; border-radius: 6px; background: none; font-size: 13px; }
+.memory-editor { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 14px 24px 18px; }
+.memory-editor textarea { flex: 1; min-height: 160px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); resize: none; font: 14px/1.7 ui-monospace, "Cascadia Code", Consolas, "Microsoft YaHei", monospace; }
+.memory-actions { display: flex; align-items: center; gap: 8px; }
+.memory-actions button { padding: 6px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.memory-actions button.primary { border: 0; background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.memory-size { margin-right: auto; color: var(--muted); font-size: 13px; }
+.memory-size.over { color: var(--danger); }
+.memory-hint { margin: 0; color: var(--muted); font-size: 12px; }
+@media (max-width: 720px) {
+  .memory-tabs, .memory-editor { padding-left: 16px; padding-right: 16px; }
+}

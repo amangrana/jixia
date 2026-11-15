@@ -3,8 +3,8 @@ import type { FormEvent, KeyboardEvent } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api, ApiError } from './api.ts';
-import { ageText, appendToDraft, completeMention, counters, defaultLabels, effortsFor, groupState, initialState, mentionAt, mentionOptions, quotaLevel, reducer, resetText, withModel } from './state.ts';
-import type { BotStatus, ChatMessage, Choice, GroupState, PendingMessage, QuotaState, Selection, ServerEvent, State } from './state.ts';
+import { ageText, appendToDraft, estimateTokens, isDirty, loadLatest, memoryArrived, memoryLabel, completeMention, counters, defaultLabels, effortsFor, groupState, initialState, mentionAt, mentionOptions, quotaLevel, reducer, resetText, withModel } from './state.ts';
+import type { BotStatus, ChatMessage, Choice, GroupState, MemoryEntry, MemoryFile, PendingMessage, QuotaState, Selection, ServerEvent, State } from './state.ts';
 
 // Unsent text per group. Kept in this browser so a reload does not lose it.
 const DRAFTS_KEY = 'jixia.drafts';
@@ -25,6 +25,9 @@ export function App() {
   const [drafts, setDrafts] = useState(loadDrafts);
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
   const [refreshingQuota, setRefreshingQuota] = useState(false);
+  const [view, setView] = useState<'chat' | 'memory'>('chat');
+  const memoryDirty = useRef(false);
+  const markMemoryDirty = useCallback((dirty: boolean) => { memoryDirty.current = dirty; }, []);
   const nextToast = useRef(0);
 
   const toast = useCallback((text: string) => {
@@ -79,9 +82,17 @@ export function App() {
   useEffect(() => { if (activeId && state.connected) void loadGroup(activeId); }, [activeId, state.connected, loadGroup]);
 
   const active = state.groups.find(group => group.id === activeId);
+  // Leaving the memory page with unsaved edits asks first.
+  const leaveMemory = () => {
+    if (view === 'memory' && memoryDirty.current && !window.confirm('记忆有未保存的修改，离开会丢掉这些修改。确定离开吗？')) return false;
+    setView('chat');
+    return true;
+  };
   return (
     <div className="app">
-      <Sidebar state={state} onSelect={id => dispatch({ type: 'select', id })} onCreate={async name => {
+      <Sidebar state={state} memoryOpen={view === 'memory'} onMemory={() => { if (view === 'memory') leaveMemory(); else setView('memory'); }}
+        onSelect={id => { if (leaveMemory()) dispatch({ type: 'select', id }); }} onCreate={async name => {
+        if (!leaveMemory()) return false;
         try { const { group } = await api.createGroup(name); dispatch({ type: 'select', id: group.id }); return true; }
         catch (error) { toast(errorText(error)); return false; }
       }} refreshing={refreshingQuota} onRefreshQuota={async () => {
@@ -93,7 +104,9 @@ export function App() {
       }} />
       <main className="chat">
         {!state.connected && <div className="banner" role="status">和后端的连接断开了，正在重连…</div>}
-        {active
+        {view === 'memory'
+          ? <MemoryPage changes={state.memoryChanges} toast={toast} onClose={leaveMemory} onDirtyChange={markMemoryDirty} />
+          : active
           ? <Chat key={active.id} id={active.id} name={active.name} group={groupState(state, active.id)} bots={state.bots}
               draft={drafts[active.id] ?? ''} setDraft={change => setDraft(active.id, change)} toast={toast}
               onDelete={async () => {
@@ -114,7 +127,10 @@ export function App() {
   );
 }
 
-function Sidebar({ state, onSelect, onCreate, onRefreshQuota, refreshing }: { state: State; onSelect: (id: string) => void; onCreate: (name: string) => Promise<boolean>; onRefreshQuota: () => void; refreshing: boolean }) {
+function Sidebar({ state, onSelect, onCreate, onRefreshQuota, refreshing, memoryOpen, onMemory }: {
+  state: State; onSelect: (id: string) => void; onCreate: (name: string) => Promise<boolean>; onRefreshQuota: () => void; refreshing: boolean;
+  memoryOpen: boolean; onMemory: () => void;
+}) {
   const [name, setName] = useState('');
   const [creating, setCreating] = useState(false);
   const submit = async (event: FormEvent) => {
@@ -126,14 +142,17 @@ function Sidebar({ state, onSelect, onCreate, onRefreshQuota, refreshing }: { st
   };
   return (
     <aside className="sidebar">
-      <h1 className="brand">jixia</h1>
+      <div className="brand-row">
+        <h1 className="brand">jixia</h1>
+        <button className={memoryOpen ? "memory-button active" : "memory-button"} onClick={onMemory} aria-pressed={memoryOpen} title="查看和编辑长期记忆">记忆</button>
+      </div>
       <form className="new-group" onSubmit={submit}>
         <input value={name} onChange={event => setName(event.target.value)} placeholder="新群的名字" maxLength={100} aria-label="新群的名字" />
         <button type="submit" disabled={!name.trim() || creating}>新建</button>
       </form>
       <nav className="groups" aria-label="群聊">
         {[...state.groups].reverse().map(group => (
-          <button key={group.id} className={group.id === state.activeId ? 'group active' : 'group'} onClick={() => onSelect(group.id)} aria-current={group.id === state.activeId}>
+          <button key={group.id} className={group.id === state.activeId && !memoryOpen ? 'group active' : 'group'} onClick={() => onSelect(group.id)} aria-current={group.id === state.activeId && !memoryOpen}>
             <span className="group-name">{group.name}</span>
             {groupState(state, group.id).round && <span className="working" title="正在回答" />}
             {state.unread[group.id] && <span className="unread" title="有新回答" />}
@@ -433,5 +452,93 @@ function Message({ message, botIndex }: { message: ChatMessage; botIndex: number
         ? <div className="bubble failed"><strong>回答失败</strong>{message.content}</div>
         : <div className="bubble markdown"><Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown></div>}
     </div>
+  );
+}
+
+// Long-term memory files, editable. Saving is refused when the file changed
+// after it was loaded (a bot wrote to it), and your text stays in the box.
+function MemoryPage({ changes, toast, onClose, onDirtyChange }: {
+  changes: Record<string, number>; toast: (text: string) => void; onClose: () => void; onDirtyChange: (dirty: boolean) => void;
+}) {
+  const [entries, setEntries] = useState<Record<string, MemoryEntry>>({});
+  const [order, setOrder] = useState<string[]>([]);
+  const [current, setCurrent] = useState('common');
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Loads every file; edits in progress are kept (see memoryArrived).
+  const load = useCallback(async () => {
+    try {
+      const { files } = await api.memory();
+      setOrder(files.map(file => file.name));
+      setEntries(previous => Object.fromEntries(files.map(file => [file.name, memoryArrived(previous[file.name], file)])));
+      setLoadError(null);
+    } catch (error) { setLoadError(errorText(error)); }
+  }, []);
+  // On open, and whenever a file is written while the page is open.
+  const changeKey = JSON.stringify(changes);
+  useEffect(() => { void load(); }, [load, changeKey]);
+
+  const dirty = Object.values(entries).some(isDirty);
+  useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
+  // A closed tab or reload would lose unsaved text; the browser asks first.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+
+  const entry = entries[current];
+  const update = (change: (entry: MemoryEntry) => MemoryEntry) => setEntries(all => all[current] ? { ...all, [current]: change(all[current]) } : all);
+  const save = async () => {
+    if (!entry) return;
+    setSaving(true);
+    try {
+      const { file } = await api.saveMemory(current, entry.text, entry.saved.version);
+      setEntries(all => ({ ...all, [current]: { saved: file, text: all[current]?.text === entry.text ? file.content : all[current].text } }));
+      toast(`${memoryLabel(current)}已保存，下一轮开始生效`);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'memory-changed') update(value => ({ ...value, latest: error.data.latest as MemoryFile }));
+      else toast(errorText(error));
+    } finally { setSaving(false); }
+  };
+
+  const tokens = entry ? estimateTokens(entry.text) : 0;
+  return (
+    <section className="memory-page" aria-label="记忆">
+      <header className="chat-header">
+        <h2>记忆</h2>
+        <span className="status">所有群共用，bot 每一轮都会读到</span>
+        <button className="memory-close" onClick={onClose}>关闭</button>
+      </header>
+      {loadError && <div className="banner error" role="alert">读取记忆失败：{loadError}</div>}
+      <div className="memory-tabs" role="tablist">
+        {order.map(name => (
+          <button key={name} role="tab" aria-selected={name === current} className={name === current ? 'active' : undefined} onClick={() => setCurrent(name)}>
+            {memoryLabel(name)}{entries[name] && isDirty(entries[name]) ? ' ●' : ''}
+          </button>
+        ))}
+      </div>
+      {entry?.latest && (
+        <div className="banner" role="alert">
+          这份记忆在你打开之后被写入了新内容（可能是 bot 写的）。为了不覆盖它，现在不能保存；你改的文字还在下面，需要的话先复制出来。
+          <button onClick={() => update(loadLatest)}>载入最新内容（放弃你的修改）</button>
+        </div>
+      )}
+      {entry && (
+        <div className="memory-editor">
+          <textarea value={entry.text} onChange={event => { const text = event.target.value; update(value => ({ ...value, text })); }}
+            aria-label={memoryLabel(current)} spellCheck={false}
+            placeholder={'还没有内容。每行一条，例如：\n[2026-11-15] 用户喝咖啡不加糖。'} />
+          <div className="memory-actions">
+            <span className={tokens > entry.saved.limit ? 'memory-size over' : 'memory-size'}>约 {tokens} / {entry.saved.limit} token{tokens > entry.saved.limit ? '，建议整理' : ''}</span>
+            <button onClick={() => update(value => ({ ...value, text: value.saved.content }))} disabled={!isDirty(entry) || saving}>放弃修改</button>
+            <button className="primary" onClick={save} disabled={!isDirty(entry) || saving || Boolean(entry.latest)}>{saving ? '保存中…' : '保存'}</button>
+          </div>
+          <p className="memory-hint">保存前的旧内容会备份到 data/memory/history/，每份记忆保留最近 20 份。</p>
+        </div>
+      )}
+    </section>
   );
 }

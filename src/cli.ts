@@ -46,6 +46,8 @@ export type CliConfig = {
   effort?: string;
   /** The CLI's own default model as the startup query reported it; recorded when no model was given and the CLI does not say. */
   defaultModel?: string;
+  /** The effort the CLI uses when given none, as the startup query reported it for this model; recorded, never passed. */
+  defaultEffort?: string;
   env?: NodeJS.ProcessEnv;
 };
 
@@ -271,7 +273,9 @@ export async function runCli(config: CliConfig, prompt: string, stable?: string)
     if (result.exitCode !== 0) throw new CliError('exit', `${NAME[config.provider]} 异常退出（退出码 ${result.exitCode}）`, tail(result.stderr || result.stdout));
     const final = config.provider === 'codex' ? await readFile(files.final, 'utf8').catch(() => undefined) : undefined;
     const output = parseOutput(config.provider, result.stdout, final);
-    return { ...output, model: usedModel(config.provider, result.stdout, config.model, config.defaultModel), ...(config.effort ? { effort: config.effort } : {}) };
+    // Neither CLI says which effort it used; a known default stands in when none was given.
+    const effort = config.effort ?? config.defaultEffort;
+    return { ...output, model: usedModel(config.provider, result.stdout, config.model, config.defaultModel), ...(effort ? { effort } : {}) };
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }

@@ -335,3 +335,17 @@ test('quota readings are served, refreshed on request and pushed over the WebSoc
   assert.equal((await call('POST', '/api/quota/refresh')).quotas.claude.quota.fiveHour.usedPercent, 42);
   await until(() => events.some(e => e.type === 'quota' && e.quotas.claude.quota.fiveHour.usedPercent === 42), 'the new reading to be pushed');
 });
+
+test('memory files are listed and saved over HTTP; a stale save gets 409 with the current file, and changes are pushed', async t => {
+  const app = await start(t, { bots: { claude: echo('claude') }, config: { bots: { claude: { provider: 'claude' } } } });
+  const listed = (await app.api('GET', '/api/memory')).body.files;
+  assert.deepEqual(listed.map((file: Json) => [file.name, file.content]), [['common', ''], ['claude', '']]);
+  const saved = await app.api('PUT', '/api/memory/common', { content: '[2026-11-15] 喜欢乌龙茶\n', baseVersion: listed[0].version });
+  assert.equal(saved.status, 200);
+  assert.equal(await readFile(join(app.root, 'data', 'memory', 'common.md'), 'utf8'), '[2026-11-15] 喜欢乌龙茶\n');
+  await until(() => app.events.some(e => e.type === 'memory' && e.name === 'common'), 'the change to be pushed');
+  const stale = await app.api('PUT', '/api/memory/common', { content: '旧版本上改的', baseVersion: listed[0].version });
+  assert.deepEqual([stale.status, stale.body.code, stale.body.latest.content], [409, 'memory-changed', '[2026-11-15] 喜欢乌龙茶\n']);
+  assert.equal((await app.api('PUT', '/api/memory/..%2Fx', { content: 'x', baseVersion: 'y' })).status, 400);
+  assert.equal((await app.api('PUT', '/api/memory/common', { content: 5, baseVersion: 'y' })).status, 400);
+});

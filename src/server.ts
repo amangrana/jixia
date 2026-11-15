@@ -5,6 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { GroupBusyError, GroupNotFoundError } from './groups.ts';
+import { MemoryChangedError } from './memory.ts';
 import type { QuotaMonitor } from './quota.ts';
 import { GroupRetiredError, MessageTooLongError, NotQueuedError } from './scheduler.ts';
 import type { Groups } from './groups.ts';
@@ -91,7 +92,13 @@ export async function startServer(options: { groups: Groups; port: number; stati
 
     if (is('GET', 'api', 'status')) return { body: { bots: groups.bots } };
     // Usage of each subscription, keyed by provider. Empty when no monitor runs.
-    if (is('GET', 'api', 'quota')) return { body: { quotas: options.quota?.get() ?? {} } };
+    if (is('GET', 'api', 'memory')) return { body: { files: await groups.memory.list() } };
+    if (is('PUT', 'api', 'memory', null)) {
+      const body = await readJson(request);
+      if (typeof body.content !== 'string' || typeof body.baseVersion !== 'string') throw new HttpError(400, '需要 content 和 baseVersion');
+      return { body: { file: await groups.memory.save(parts[2], body.content, body.baseVersion) } };
+    }
+    if (is('GET', 'api', 'quota'))return { body: { quotas: options.quota?.get() ?? {} } };
     if (is('POST', 'api', 'quota', 'refresh')) { await options.quota?.refresh(); return { body: { quotas: options.quota?.get() ?? {} } }; }
     if (is('GET', 'api', 'groups')) return { body: { groups: groups.list() } };
     if (is('POST', 'api', 'groups')) return { status: 201, body: { group: await groups.create((await readJson(request)).name) } };
@@ -141,10 +148,12 @@ export async function startServer(options: { groups: Groups; port: number; stati
     throw new HttpError(404, '没有这个接口');
   }
 
-  const failure = (error: unknown): { status: number; body: { error: string; code: string } } => {
+  const failure = (error: unknown): { status: number; body: { error: string; code: string; latest?: unknown } } => {
     if (error instanceof HttpError) return { status: error.status, body: { error: error.message, code: 'bad-request' } };
     if (error instanceof GroupNotFoundError || error instanceof GroupRetiredError) return { status: 404, body: { error: '群不存在', code: 'group-not-found' } };
-    if (error instanceof GroupBusyError) return { status: 409, body: { error: error.message, code: 'group-busy' } };
+    // The current file comes back with the refusal, so the page can show it without asking again.
+    if (error instanceof MemoryChangedError) return { status: 409, body: { error: error.message, code: 'memory-changed', latest: error.latest } };
+    if (error instanceof GroupBusyError)return { status: 409, body: { error: error.message, code: 'group-busy' } };
     if (error instanceof MessageTooLongError) return { status: 413, body: { error: error.message, code: 'message-too-long' } };
     if (error instanceof NotQueuedError) return { status: 409, body: { error: '消息已开始处理', code: 'not-queued' } };
     if (error instanceof RangeError) return { status: 400, body: { error: error.message, code: 'bad-request' } };

@@ -6,8 +6,9 @@ import { runCli } from './cli.ts';
 import { createCompactor } from './compact.ts';
 import { createPreparer } from './context.ts';
 import { createLimiter } from './limiter.ts';
-import { createMemoryWriter } from './memory.ts';
-import { MODEL_TOKEN } from './models.ts';
+import { createMemory } from './memory.ts';
+import type { Memory } from './memory.ts';
+import { defaultEffortFor, MODEL_TOKEN } from './models.ts';
 import type { Provider } from './cli.ts';
 import type { ModelList } from './models.ts';
 import { Scheduler } from './scheduler.ts';
@@ -27,7 +28,8 @@ export type AppEvent =
   | ({ group: string } & SchedulerEvent)
   | { group: string; type: 'selection'; selection: Selection }
   | { group: string; type: 'error'; message: string }
-  | { type: 'groups'; groups: GroupInfo[] };
+  | { type: 'groups'; groups: GroupInfo[] }
+  | { type: 'memory'; name: string };
 
 export class GroupNotFoundError extends Error {
   constructor() { super('群不存在'); this.name = 'GroupNotFoundError'; }
@@ -82,6 +84,8 @@ export class Groups {
   #bots: Record<string, Bot>;
   #statuses: BotStatus[];
   #applyMemory;
+  /** The memory files: bots' write requests and edits from the memory page share one lock. */
+  readonly memory: Memory;
   #summarize: ((prompt: string) => Promise<string>) | undefined;
   #compactors = new Map<string, ReturnType<typeof createCompactor>>();
   // What was saved for each group. A bot missing from it uses the config default.
@@ -93,10 +97,13 @@ export class Groups {
     const data = join(options.root, 'data');
     this.#dir = { groups: join(data, 'groups'), memory: join(data, 'memory'), work: join(data, 'work') };
     const { config } = options;
-    this.#applyMemory = createMemoryWriter({
+    this.memory = createMemory({
       commonPath: join(this.#dir.memory, 'common.md'), selfPath: bot => join(this.#dir.memory, `${bot}.md`),
-      defaultWriter: config.defaultWriter, maxMemoryTokens: config.maxMemoryTokens,
+      defaultWriter: config.defaultWriter, maxMemoryTokens: config.maxMemoryTokens, bots: Object.keys(config.bots),
     });
+    this.#applyMemory = this.memory.apply;
+    // The memory page refreshes a file when it changes, whoever wrote it.
+    this.memory.subscribe(name => this.#emit({ type: 'memory', name }));
     this.#statuses = Object.entries(config.bots).map(([name, bot]) => {
       const login = options.logins[name] ?? { kind: 'unknown' as const, detail: '没有登录检查结果' };
       return { name, provider: bot.provider, enabled: !config.requireSubscription || login.kind === 'subscription', login, models: options.models?.[bot.provider] ?? { models: [], defaultEfforts: [] } };
@@ -107,7 +114,7 @@ export class Groups {
       // A bot that is not on a subscription login stays in the group but never
       // starts its CLI: every message to it fails with the reason, in view.
       const run: Bot = status.enabled
-        ? input => limit(() => runCli({ provider: bot.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, model: input.model, effort: input.effort, defaultModel: status.models.defaultModel?.id }, input.prompt!, input.stable))
+        ? input => limit(() => runCli({ provider: bot.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, model: input.model, effort: input.effort, defaultModel: status.models.defaultModel?.id, defaultEffort: defaultEffortFor(status.models, input.model) }, input.prompt!, input.stable))
         : async () => { throw new Error(`${status.name} 未启用：${status.login.detail}。jixia 只走订阅登录；确认无误后可在 config.yaml 里把 requireSubscription 设为 false`); };
       return [status.name, run];
     }));

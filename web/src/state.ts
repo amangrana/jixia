@@ -12,6 +12,7 @@ export type BotStatus = { name: string; provider: string; enabled: boolean; logi
 export type Choice = { model?: string; effort?: string };
 export type Selection = Record<string, Choice>;
 
+export type MemoryFile = { name: string; content: string; version: string; tokens: number; limit: number };
 export type QuotaWindow = { usedPercent: number; resetsAt?: string };
 export type QuotaState = { quota?: { fiveHour?: QuotaWindow; weekly?: QuotaWindow }; checkedAt?: string; error?: string };
 export type Quotas = Record<string, QuotaState>;
@@ -23,7 +24,8 @@ export type ServerEvent =
   | { group: string; type: 'selection'; selection: Selection }
   | { group: string; type: 'error'; message: string }
   | { type: 'groups'; groups: GroupInfo[] }
-  | { type: 'quota'; quotas: Quotas };
+  | { type: 'quota'; quotas: Quotas }
+  | { type: 'memory'; name: string };
 
 export type GroupState = {
   /** False until the first snapshot arrives; pushed events may come before it. */
@@ -50,6 +52,8 @@ export type State = {
   unread: Record<string, true>;
   /** Subscription usage per provider (claude, codex). */
   quotas: Quotas;
+  /** Bumped each time a memory file is written, by a bot or by you; the memory page reloads on it. */
+  memoryChanges: Record<string, number>;
 };
 
 export type Snapshot = { records: ChatMessage[]; hasMore: boolean; queue: PendingMessage[]; round: RoundState | null; selection?: Selection };
@@ -64,7 +68,7 @@ export type Action =
   | { type: 'older'; id: string; records: ChatMessage[]; hasMore: boolean }
   | { type: 'event'; event: ServerEvent };
 
-export const initialState: State = { connected: false, groups: [], bots: [], activeId: null, byId: {}, unread: {}, quotas: {} };
+export const initialState: State = { connected: false, groups: [], bots: [], activeId: null, byId: {}, unread: {}, quotas: {}, memoryChanges: {} };
 const emptyGroup: GroupState = { loaded: false, records: [], hasMore: false, queue: [], round: null, error: null, queueEvents: 0, roundEvents: 0, selection: {}, selectionEvents: 0 };
 
 export const groupState = (state: State, id: string): GroupState => state.byId[id] ?? emptyGroup;
@@ -112,6 +116,7 @@ export function reducer(state: State, action: Action): State {
       const event = action.event;
       if (event.type === 'groups') return reducer(state, { type: 'groups', groups: event.groups });
       if (event.type === 'quota') return { ...state, quotas: event.quotas };
+      if (event.type === 'memory') return { ...state, memoryChanges: { ...state.memoryChanges, [event.name]: (state.memoryChanges[event.name] ?? 0) + 1 } };
       const id = event.group;
       switch (event.type) {
         case 'message': {
@@ -204,4 +209,36 @@ export function ageText(checkedAt: string | undefined, now: Date): string {
   if (!checkedAt) return '';
   const minutes = Math.max(0, Math.round((now.getTime() - new Date(checkedAt).getTime()) / 60000));
   return minutes < 1 ? '刚才' : minutes < 60 ? `${minutes} 分钟前` : `${Math.floor(minutes / 60)} 小时前`;
+}
+
+// ---- Memory page ----
+
+/** Same estimate as the backend's src/tokens.ts, for the size shown while typing. */
+export function estimateTokens(text: string): number {
+  let wide = 0;
+  for (const char of text) if (char.codePointAt(0)! >= 0x2e80) wide++;
+  return wide + Math.ceil((text.length - wide) / 4);
+}
+
+/**
+ * One memory file on the page. `saved` is what is on disk as far as the page
+ * knows; `text` is the box. `latest` is set when the file changed on disk
+ * while you had unsaved edits: your text stays, and saving will be refused.
+ */
+export type MemoryEntry = { saved: MemoryFile; text: string; latest?: MemoryFile };
+
+export const isDirty = (entry: MemoryEntry) => entry.text !== entry.saved.content;
+export const memoryLabel = (name: string) => name === 'common' ? '公共记忆' : `${name} 的记忆`;
+
+/** A file arrived from the backend. Unsaved edits are never overwritten. */
+export function memoryArrived(entry: MemoryEntry | undefined, file: MemoryFile): MemoryEntry {
+  if (!entry || !isDirty(entry)) return { saved: file, text: file.content };
+  if (file.version === entry.saved.version) return entry;
+  return { ...entry, latest: file };
+}
+
+/** "载入最新内容": your edits give way to what is on disk now. */
+export function loadLatest(entry: MemoryEntry): MemoryEntry {
+  const file = entry.latest ?? entry.saved;
+  return { saved: file, text: file.content };
 }
