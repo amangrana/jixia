@@ -1,0 +1,33 @@
+# 复制为 config.yaml 后修改。没有 config.yaml 时全部使用下面这些默认值。
+# 写了不认识的配置项会在启动时报错，不会被悄悄忽略。
+
+port: 4517                # 只监听 127.0.0.1
+
+bots:                     # model 和 effort 是新建群时的初始选择；之后在界面上按群改
+  claude:
+    provider: claude      # Claude Code
+    # model: opus
+    # effort: medium
+  chatgpt:
+    provider: codex       # Codex CLI
+    # model: gpt-6.1-Sol
+    # effort: medium
+
+defaultWriter: claude     # 公共记忆的默认写入者；消息只 @ 一个 bot 时由那个 bot 写
+
+cliTimeoutSeconds: 300    # 单次 CLI 调用的超时
+maxParallelCli: 4         # 所有群加起来同时运行的 CLI 进程上限
+
+maxPromptTokens: 120000   # 上下文预算（估算），超过就拒绝调用
+maxMessageTokens: 30000   # 单条消息上限（估算），超过就不入队
+maxMemoryTokens: 8000     # 记忆文件超过这个大小时提示整理
+
+requireSubscription: true # 只在 CLI 是订阅登录时启用对应的 bot
+
+compact:                  # 对话过长时自动压缩成摘要；指令在 prompts/compact.md
+  provider: claude        # 用哪个 CLI 做压缩：claude 或 codex
+  model: sonnet
+  effort: low
+  thresholdTokens: 40000  # 摘要加摘要之后的原文超过这个大小（估算）就压缩
+  keepRounds: 3           # 最近几轮始终保留原文
+  maxSummaryTokens: 4000  # 摘要长度上限（估算），超过就不采用
