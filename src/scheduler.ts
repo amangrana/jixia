@@ -23,7 +23,17 @@ export type Bot = (input: RoundInput & { prompt?: string }) => Promise<string | 
 // Runs once per round before any bot starts and returns each target bot's
 // prompt, or the reason that bot must not be called this round.
 export type Prepare = (input: RoundInput) => Promise<Record<string, { prompt: string } | { error: string }>>;
-export type SchedulerOptions = { prepare?: Prepare; maxMessageTokens?: number; applyMemory?: ApplyMemory };
+export type RoundState = { messageId: string; userSeq: number; pending: string[] };
+// What a UI needs to stay current. Emitted only after the change is on disk.
+export type SchedulerEvent =
+  | { type: 'message'; message: ChatMessage }
+  | { type: 'queue'; queue: PendingMessage[] }
+  | { type: 'round'; round: RoundState | null };
+export type SchedulerOptions = { prepare?: Prepare; maxMessageTokens?: number; applyMemory?: ApplyMemory; onEvent?: (event: SchedulerEvent) => void };
+/** The message already started processing (or was removed), so it can no longer be edited, deleted or moved. */
+export class NotQueuedError extends Error {
+  constructor() { super('Message is no longer queued'); this.name = 'NotQueuedError'; }
+}
 type ActiveRound ={ message: PendingMessage; userSeq: number; outstanding: string[] };
 type Event =
   | { kind: 'enqueue'; message: PendingMessage }
@@ -46,6 +56,7 @@ export class Scheduler {
   #prepare: Prepare | undefined;
   #maxMessageTokens: number;
   #applyMemory: ApplyMemory | undefined;
+  #onEvent: ((event: SchedulerEvent) => void) | undefined;
   #queue: PendingMessage[] = [];
   #history: ChatMessage[] = [];
   #seen = new Map<string, PendingMessage>();
@@ -63,6 +74,7 @@ export class Scheduler {
     this.#prepare = options.prepare;
     this.#maxMessageTokens = options.maxMessageTokens ?? DEFAULT_MAX_MESSAGE_TOKENS;
     this.#applyMemory = options.applyMemory;
+    this.#onEvent = options.onEvent;
   }
 
   static async open(directory: string, bots: Record<string, Bot>, options: SchedulerOptions = {}): Promise<Scheduler> {
@@ -117,6 +129,19 @@ export class Scheduler {
 
   /** True after a storage failure: every further call fails until the group is opened again. */
   get needsReopen(): boolean { return this.#poisoned; }
+  get round(): RoundState | null {
+    return this.#active ? { messageId: this.#active.message.id, userSeq: this.#active.userSeq, pending: [...this.#active.outstanding] } : null;
+  }
+
+  // A listener that throws must not disturb scheduling.
+  #emit(event: Event): void {
+    if (!this.#onEvent) return;
+    const send = (payload: SchedulerEvent) => { try { this.#onEvent!(structuredClone(payload)); } catch { /* listener's problem */ } };
+    if (event.kind === 'enqueue' || event.kind === 'remove' || event.kind === 'top' || event.kind === 'start') send({ type: 'queue', queue: this.#queue });
+    if (event.kind === 'start') send({ type: 'message', message: event.user });
+    if (event.kind === 'result' || event.kind === 'notice') send({ type: 'message', message: event.message });
+    if (event.kind === 'start' || event.kind === 'result' || event.kind === 'finish') send({ type: 'round', round: this.round });
+  }
   get queue(): PendingMessage[] { return structuredClone(this.#queue); }
   get history(): ChatMessage[] { return structuredClone(this.#history); }
 
@@ -139,6 +164,7 @@ export class Scheduler {
       } finally { await file.close(); }
     } catch (error) { this.#poisoned = true; throw error; }
     this.#apply(event);
+    this.#emit(event);
     if (event.kind === 'start') await this.#project(event.user);
     else if (event.kind === 'result' || event.kind === 'notice') await this.#project(event.message);
   }
@@ -195,7 +221,7 @@ export class Scheduler {
   remove(id: string): Promise<PendingMessage> {
     return this.#serial(async () => {
       const message = this.#queue.find(m => m.id === id);
-      if (!message) throw new Error('Message is no longer queued');
+      if (!message) throw new NotQueuedError();
       await this.#record({ kind: 'remove', id });
       return structuredClone(message); // UI can restore this exact accepted text.
     });
@@ -203,7 +229,7 @@ export class Scheduler {
 
   moveToTop(id: string): Promise<void> {
     return this.#serial(async () => {
-      if (!this.#queue.some(m => m.id === id)) throw new Error('Message is no longer queued');
+      if (!this.#queue.some(m => m.id === id)) throw new NotQueuedError();
       if (this.#queue[0].id !== id) await this.#record({ kind: 'top', id });
     });
   }

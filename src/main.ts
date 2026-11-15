@@ -1,0 +1,24 @@
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { checkLogin } from './auth.ts';
+import { loadConfig } from './config.ts';
+import { Groups } from './groups.ts';
+import { startServer } from './server.ts';
+import type { LoginStatus } from './auth.ts';
+import type { Provider } from './cli.ts';
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const config = await loadConfig(join(root, 'config.yaml'));
+
+// One check per CLI, shared by every bot that uses it.
+const byProvider = new Map<Provider, Promise<LoginStatus>>();
+const logins: Record<string, LoginStatus> = {};
+for (const [name, bot] of Object.entries(config.bots)) {
+  if (!byProvider.has(bot.provider)) byProvider.set(bot.provider, checkLogin(bot.provider));
+  logins[name] = await byProvider.get(bot.provider)!;
+}
+
+const groups = await Groups.open({ root, config, logins });
+const server = await startServer({ groups, port: config.port });
+console.log(`jixia 后端已启动：http://127.0.0.1:${server.port}`);
+for (const bot of groups.bots) console.log(`  ${bot.name}（${bot.provider}）：${bot.enabled ? '已启用' : '未启用'}，${bot.login.detail}`);

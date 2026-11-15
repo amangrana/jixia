@@ -1,16 +1,70 @@
 # jixia
 
-当前包含 CLI 可行性测试、最小调度器核心、CLI adapter、上下文拼装和长期记忆写入，尚无网页界面、HTTP/WebSocket 服务和自动 compact。设计见 `jixia 设计文档 v1.md`，测试证据见 `jixia CLI 实测记录.md`。
+当前包含后端的全部主体：调度器、CLI adapter、上下文拼装、长期记忆写入，以及本地 HTTP/WebSocket 服务。尚无网页界面和自动 compact。
+
+## 启动
+
+需要 Node 24 或更新版本，以及已用订阅登录的 Claude Code 和 Codex CLI。
+
+```powershell
+npm install
+```
+
+```powershell
+npm start
+```
+
+后端只监听 `127.0.0.1`，默认端口 4517。启动时会查询两个 CLI 的登录类型并打印出来；不是订阅登录的 bot 不会启用。配置见 `config.example.yaml`，复制为 `config.yaml` 后修改，没有这个文件时全部用默认值。聊天记录和记忆在 `data/` 下，不进 git。设计见 `jixia 设计文档 v1.md`，测试证据见 `jixia CLI 实测记录.md`。
 
 ## 运行核心测试
 
-需要 Node 24 或更新版本，利用 Node 原生 TypeScript 类型擦除执行，不需要安装 npm 依赖。
+利用 Node 原生 TypeScript 类型擦除执行，没有编译步骤。运行时依赖只有 `ws` 和 `yaml`。
 
 ```powershell
-node --test tests/scheduler.test.ts tests/routing.test.ts tests/cli.test.ts tests/context.test.ts tests/memory.test.ts
+npm test
 ```
 
-普通安装了 npm 的终端也可以运行 `npm test`。这些测试只调用模拟 bot，不消耗模型额度，使用项目内随机临时目录并在完成后清理。测试包括终止自己创建的测试子进程来模拟崩溃。
+这些测试只调用模拟 bot，不消耗模型额度，使用项目内随机临时目录并在完成后清理。测试包括终止自己创建的测试子进程来模拟崩溃，以及在随机端口上启动真实的 HTTP/WebSocket 服务。
+
+## 后端服务
+
+入口是 `src/main.ts`；`src/groups.ts` 管理数据目录和各群的调度器，`src/server.ts` 是 HTTP 和 WebSocket。
+
+| 方法和路径 | 作用 |
+| --- | --- |
+| `GET /api/status` | 各 bot 是否启用、登录类型检查结果 |
+| `GET /api/groups` | 群列表 |
+| `POST /api/groups` | 新建群，传 `name`；`id` 由后端生成 |
+| `GET /api/groups/:id` | 记录尾部（默认最近 200 条，可传 `limit`）、`hasMore`、当前队列、进行中的轮次 |
+| `GET /api/groups/:id/records?before=&limit=` | 往前翻更早的记录 |
+| `POST /api/groups/:id/messages` | 发送消息，传前端生成的 `id` 和 `content`；返回 202。同一 `id` 同样内容重发不会重复入队 |
+| `DELETE /api/groups/:id/queue/:messageId` | 从队列移除并返回原文，删除和编辑都用它 |
+| `POST /api/groups/:id/queue/:messageId/top` | 移到队首，返回新队列 |
+
+错误响应是 `{error, code}`。`code` 有：`message-too-long`（413）、`not-queued`（409，消息已开始处理）、`id-reused`（409）、`group-not-found`（404）、`bad-request`（400 或 404）、`forbidden`（403）。
+
+WebSocket 在 `/ws`，后端推送的每条事件是一个 JSON 对象：
+
+- `{group, type: "message", message}`：新的用户消息、回答、失败或系统提示。
+- `{group, type: "queue", queue}`：整份队列快照。
+- `{group, type: "round", round}`：`round` 为 `{messageId, userSeq, pending}`，一轮结束时为 `null`。
+- `{group, type: "error", message}`：这个群处理队列时出错。
+- `{type: "groups", groups}`：群列表变了。
+
+连接后不补发历史；前端（重新）连接后调一次 `GET /api/groups/:id`，再应用之后推来的事件。
+
+几条行为：
+
+- **只走订阅。** 启动时查询 `claude auth status --json` 和 `codex login status`。只有报告订阅登录的 CLI 才启用对应的 bot；其他情况下发给它的消息直接记为失败并写明原因。`requireSubscription: false` 可以放行。这只说明启动时 CLI 报告的登录类型，不等于核对过账单。
+- **自动重开。** 某个群因为写入错误停止后，下一次对它的请求会重新打开它：未完成的轮次记为“回答中断”，排队消息继续处理。重启后也一样，不需要先发新消息。
+- **全局并发。** 所有群同时运行的 CLI 进程不超过 `maxParallelCli`，超出的排队等待。
+- **来源检查。** 只接受发往本机地址、且来自本机页面的请求，其他网站的页面无法调用这些接口。
+
+真实检查，使用一次性的数据目录，每次运行发 2 个短请求：
+
+```powershell
+node tests/server-live.mjs
+```
 
 ## 核心接口
 
@@ -20,6 +74,7 @@ node --test tests/scheduler.test.ts tests/routing.test.ts tests/cli.test.ts test
 - `enqueue({id, content, targets?})`：入队并持久化；单条消息估算超过 `maxMessageTokens`（默认 3 万）时抛出 `MessageTooLongError`，消息不进队列和历史，前端应把原文留在输入框；不传 `targets` 时按内容里的 @ 路由（不 @ 或 `@all` 发给所有 bot，`@名字` 只发给被点名的 bot，见 `src/routing.ts`）；相同 ID 和内容的重试不重复入队，ID 携带不同内容则拒绝。
 - `remove(id)`：移除仍在排队的消息，并返回调度层确认移除的原文；前端可将它取回输入框。编辑后重新发送必须使用新 ID。
 - `moveToTop(id)`：移到待处理队首，不影响当前轮。
+- `onEvent`：每次变更落盘后回调，事件为 `message`、`queue` 或 `round`；`round` 属性返回进行中的轮次。
 - `runUntilIdle()`：开始／等待处理队列。服务调用方在入队后触发；本核心没有后台常驻循环。
 - `queue`、`history`：返回快照，不向外暴露可变状态。
 

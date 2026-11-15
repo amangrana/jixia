@@ -1,0 +1,9 @@
+node_modules/
+# Chat records and memory are personal data, not source.
+data/
+# Left behind only when a test run is killed midway.
+.scheduler-test-*/
+.context-test-*/
+.memory-test-*/
+.server-test-*/
+.live-data-*/
