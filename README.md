@@ -199,6 +199,22 @@ bot 可以只返回一段文字，也可以返回 `{reply, memoryRequests}`。`s
 node tests/context-live.mjs
 ```
 
+## 验收用的启动方式
+
+用真实的两个 CLI 走完整流程，但不动你自己的 `data/`：
+
+```powershell
+node tests/acceptance-server.mjs
+```
+
+打开 http://127.0.0.1:4600 。数据放在 `.live-data-acceptance`，重启后保留，用完可以整个删掉。默认用小模型和 `low`，压缩阈值调低到 2500，聊十几轮就会触发压缩。每条消息都消耗订阅额度。第三个参数写 `break-models` 时模拟模型列表查询失败。
+
+测量 CLI 自带内容的 token 开销和跨进程缓存，共 8 个小模型请求：
+
+```powershell
+node tests/usage-live.mjs
+```
+
 ## 存储选择与限制
 
 最小核心使用每群 `events.jsonl` 作为唯一事实来源，覆盖入队、删除、重排、开始轮次、回答和结束轮次。开始轮次的一条事件同时表达出队与用户消息进入正式历史，避免分别更新 `queue.json` 和聊天 JSONL 的崩溃窗口。事件写入并 sync 后才确认；聊天消息仍有独立连续 seq，队列没有聊天 seq。
