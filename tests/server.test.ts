@@ -31,6 +31,8 @@ async function start(t: { after: (fn: () => Promise<void>) => void }, options: {
     t.after(async () => { await Promise.all(closers.splice(0).map(close => close())); await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); });
     await mkdir(join(root, 'prompts'));
     await writeFile(join(root, 'prompts', 'system.md'), '你是 {{self}}');
+    // The real discussion instructions: later discussion steps cannot start without them.
+    await writeFile(join(root, 'prompts', 'discussion.md'), await readFile(join(process.cwd(), 'prompts', 'discussion.md'), 'utf8'));
   }
   const groups = await Groups.open({ root, config: resolveConfig(options.config), logins: options.logins ?? { claude: subscription, chatgpt: subscription }, bots: options.bots, models: options.models });
   const server = await startServer({ groups, port: 0 });
@@ -416,4 +418,80 @@ test('search and session switches belong to each group: new groups start from co
   assert.deepEqual((await again.api('GET', `/api/groups/${a}`)).body.switches, { webSearch: true, keepSessions: true });
   assert.deepEqual((await again.api('GET', `/api/groups/${b}`)).body.switches, { webSearch: false, keepSessions: false });
   assert.deepEqual((await again.api('GET', `/api/groups/${await again.newGroup('丙')}`)).body.switches, { webSearch: true, keepSessions: false });
+});
+
+test('a discussion over HTTP: rounds sent with the message, progress pushed, stop on request, and a usage limit ends it', async t => {
+  const gate = deferred<void>(), reached = deferred<void>();
+  const answer = (name: string): Bot => async input => {
+    if (input.step?.round === 2 && input.message.id === 'stop-me') { reached.resolve(); await gate.promise; }
+    return { reply: `${name} ${input.step?.round ?? 'plain'}`, moreToSay: true };
+  };
+  const app = await start(t, { bots: { claude: answer('claude'), chatgpt: answer('chatgpt') } });
+  assert.deepEqual((await app.api('GET', '/api/status')).body.discussion, { rounds: 2, max: 4 });
+  const id = await app.newGroup();
+  for (const bad of [0, 9, '2']) assert.equal((await app.api('POST', `/api/groups/${id}/messages`, { id: `bad-${bad}`, content: 'x', discuss: bad })).status, 400);
+  assert.equal((await app.api('POST', `/api/groups/${id}/discussion/stop`)).body.stopped, false);
+
+  await app.api('POST', `/api/groups/${id}/messages`, { id: 'stop-me', content: '讨论', discuss: 3 });
+  await reached.promise;
+  assert.deepEqual((await app.api('GET', `/api/groups/${id}`)).body.round.step, { round: 2, rounds: 4 });
+  assert.equal((await app.api('POST', `/api/groups/${id}/discussion/stop`)).body.stopped, true);
+  gate.resolve();
+  await until(async () => (await app.api('GET', `/api/groups/${id}`)).body.round === null, 'the discussion to end');
+  const records = (await app.api('GET', `/api/groups/${id}`)).body.records as Json[];
+  assert.deepEqual(records.filter(r => r.type === 'reply').map(r => String(r.discussion)).sort(), ['1', '1', '2', '2', 'summary']);
+  assert.equal(records.filter(r => r.type === 'reply' && r.discussion === 3).length, 0);
+  assert.equal(records.filter(r => r.discussion === 'summary').length, 1);
+  assert(app.events.some(e => e.type === 'round' && e.round?.step?.round === 'summary'));
+});
+
+test('a discussion starts no new step for a bot whose five-hour limit is nearly used up', async t => {
+  const root = await mkdtemp(join(process.cwd(), '.server-test-'));
+  await mkdir(join(root, 'prompts'));
+  await writeFile(join(root, 'prompts', 'system.md'), '你是 {{self}}');
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }));
+  await writeFile(join(root, 'prompts', 'discussion.md'), await readFile(join(process.cwd(), 'prompts', 'discussion.md'), 'utf8'));
+  const usage = { codex: { quota: { fiveHour: { usedPercent: 91 } } } };
+  const answer: Bot = async input => ({ reply: `${input.step?.round}`, moreToSay: true });
+  const groups = await Groups.open({ root, config: resolveConfig({}), logins: {}, bots: { claude: answer, chatgpt: answer }, usage: () => usage });
+  const { id } = await groups.create('额度');
+  await groups.use(id, scheduler => scheduler.enqueue({ id: 'm1', content: '讨论', discuss: 2 }));
+  await groups.use(id, scheduler => scheduler.runUntilIdle());
+  const history = await groups.use(id, scheduler => scheduler.history);
+  assert.equal(history.filter(m => m.discussion === 2).length, 0);
+  assert(history.some(m => m.content === '讨论提前结束：chatgpt 的 5 小时额度已用 91%'));
+  // claude is under the limit, so it still writes the summary.
+  assert.equal(history.find(m => m.discussion === 'summary')?.from, 'claude');
+});
+
+test('exit: refused with the busy groups named while answering, done when forced or idle, and unavailable without a handler', async t => {
+  const gate = deferred<string>(), started = deferred<void>();
+  const root = await mkdtemp(join(process.cwd(), '.server-test-'));
+  await mkdir(join(root, 'prompts'));
+  await writeFile(join(root, 'prompts', 'system.md'), '你是 {{self}}');
+  const groups = await Groups.open({ root, config: resolveConfig({ bots: { claude: { provider: 'claude' } } }), logins: {}, bots: { claude: async () => { started.resolve(); return gate.promise; } } });
+  const exits: boolean[] = [];
+  const server = await startServer({ groups, port: 0, onExit: force => { exits.push(force); } });
+  const plain = await startServer({ groups, port: 0 });
+  t.after(async () => { gate.resolve('done'); await server.close(); await plain.close(); await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); });
+  const post = async (port: number, path: string, body: unknown) => { const response = await fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: response.status, body: await response.json() as Json }; };
+
+  assert.equal((await post(plain.port, '/api/exit', {})).status, 404);
+  const { group } = (await post(server.port, '/api/groups', { name: '忙碌的群' })).body;
+  await post(server.port, `/api/groups/${group.id}/messages`, { id: 'm1', content: '在吗' });
+  await started.promise;
+  const busy = await post(server.port, '/api/exit', {});
+  assert.deepEqual([busy.status, busy.body.code, busy.body.groups.map((g: Json) => g.name)], [409, 'busy', ['忙碌的群']]);
+  assert.match(busy.body.error, /忙碌的群 正在回答/);
+  assert.deepEqual(exits, []);
+  // Forced: the reply goes out first, then the handler runs.
+  assert.deepEqual((await post(server.port, '/api/exit', { force: true })).body, { exiting: true });
+  await until(() => exits.length === 1, 'the exit handler');
+  assert.deepEqual(exits, [true]);
+  // Idle: no confirmation needed.
+  gate.resolve('done');
+  await until(async () => (await groups.answering()).length === 0, 'the round to end');
+  assert.deepEqual((await post(server.port, '/api/exit', {})).body, { exiting: true });
+  await until(() => exits.length === 2, 'the second exit');
+  assert.deepEqual(exits, [true, false]);
 });

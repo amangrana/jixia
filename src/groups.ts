@@ -11,6 +11,10 @@ import type { Memory } from './memory.ts';
 import { defaultEffortFor, MODEL_TOKEN } from './models.ts';
 import type { Provider } from './cli.ts';
 import type { ModelList } from './models.ts';
+import type { QuotaState } from './quota.ts';
+
+/** At or above this share of a five-hour limit, a discussion starts no new step. */
+export const DISCUSSION_USAGE_LIMIT = 90;
 import { Scheduler } from './scheduler.ts';
 import type { LoginStatus } from './auth.ts';
 import type { Config } from './config.ts';
@@ -53,6 +57,8 @@ export type GroupsOptions = {
   bots?: Record<string, Bot>;
   /** Test seam: replaces the CLI call that writes a summary. */
   summarize?: (prompt: string, options?: { keepSession?: boolean }) => Promise<string>;
+  /** The subscriptions' latest usage, per CLI. A discussion does not start a new step for a bot past 90% of its five-hour limit. */
+  usage?: () => Partial<Record<Provider, QuotaState>>;
 };
 
 // Folder names are app-generated IDs, never group names, so a name cannot
@@ -121,7 +127,7 @@ export class Groups {
       // starts its CLI: every message to it fails with the reason, in view.
       const run: Bot = status.enabled
         ? input => limit(() => runCli({ provider: bot.provider, workDir: this.#dir.work, readDir: options.root, timeoutMs: config.cliTimeoutSeconds * 1000, keepSession: input.keepSessions, webSearch: input.webSearch, model: input.model, effort: input.effort, defaultModel: status.models.defaultModel?.id, defaultEffort: defaultEffortFor(status.models, input.model) }, input.prompt!, input.stable))
-        : async () => { throw new Error(`${status.name} 未启用：${status.login.detail}。jixia 只走订阅登录；确认无误后可在 config.yaml 里把 requireSubscription 设为 false`); };
+        : async () => { throw new Error(`${status.name} 未启用：${status.login.detail}。稷下只走订阅登录；确认无误后可在 config.yaml 里把 requireSubscription 设为 false`); };
       return [status.name, run];
     }));
     // Compaction goes through the same subscription check and the same global
@@ -166,6 +172,19 @@ export class Groups {
   }
 
   get bots(): BotStatus[] { return structuredClone(this.#statuses); }
+  /** Discussion steps after the first answers, unless a message says otherwise. */
+  get discussionRounds(): number { return this.#options.config.discussion.rounds; }
+
+  // A reason not to call these bots again in a discussion: a five-hour limit nearly used up. Unknown usage does not block.
+  #usageBlocks(bots: string[]): string | undefined {
+    const usage = this.#options.usage?.();
+    for (const bot of bots) {
+      const provider = this.#statuses.find(status => status.name === bot)?.provider as Provider | undefined;
+      const used = provider ? usage?.[provider]?.quota?.fiveHour?.usedPercent : undefined;
+      if (used !== undefined && used >= DISCUSSION_USAGE_LIMIT) return `${bot} 的 5 小时额度已用 ${used}%`;
+    }
+    return undefined;
+  }
   list(): GroupInfo[] { return [...this.#infos.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)); }
   info(id: string): GroupInfo {
     const info = this.#infos.get(id);
@@ -307,8 +326,11 @@ export class Groups {
         commonPath: join(this.#dir.memory, 'common.md'), selfPath: bot => join(this.#dir.memory, `${bot}.md`),
         summaryPath: join(directory, 'summary.md'), recordsPath: join(directory, 'records.jsonl'),
         bots: Object.keys(this.#bots), defaultWriter: config.defaultWriter, maxPromptTokens: config.maxPromptTokens,
+        discussionPath: join(root, 'prompts', 'discussion.md'),
       }),
       applyMemory: this.#applyMemory,
+      // The summary is written by the default writer; a usage limit nearly reached stops a discussion.
+      discussion: { defaultWriter: config.defaultWriter, canContinue: bots => this.#usageBlocks(bots) },
       maxMessageTokens: config.maxMessageTokens,
       onEvent: event => {
         this.#emit({ group: id, ...event });
@@ -412,6 +434,17 @@ export class Groups {
   }
 
   /** Call after anything that may have added work to the queue. */
+  /** Groups with a round in progress right now. */
+  async answering(): Promise<GroupInfo[]> {
+    const busy: GroupInfo[] = [];
+    for (const [id, opening] of this.#schedulers) {
+      const scheduler = await opening.catch(() => undefined);
+      const info = this.#infos.get(id);
+      if (scheduler?.round && info) busy.push(info);
+    }
+    return busy;
+  }
+
   kick(id: string): void {
     this.#scheduler(id).then(scheduler => this.#drain(id, scheduler), () => {});
   }

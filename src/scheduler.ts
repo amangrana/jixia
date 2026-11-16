@@ -11,15 +11,23 @@ export class MessageTooLongError extends Error {
   constructor(tokens: number, limit: number) { super(`消息过长，没有发送：估算 ${tokens} token，单条上限 ${limit}。请缩短或拆分后重发`); this.name = 'MessageTooLongError'; }
 }
 
-export type PendingMessage = { id: string; content: string; targets: string[] };
+// `discuss` asks for an automatic discussion after the first answers: how many
+// more steps at most (1 to MAX_DISCUSSION_ROUNDS). Absent means a plain round.
+export type PendingMessage = { id: string; content: string; targets: string[]; discuss?: number };
 // Omit targets to route by the @ mentions in the content.
-export type NewMessage = { id: string; content: string; targets?: string[] };
+export type NewMessage = { id: string; content: string; targets?: string[]; discuss?: number };
+export const MAX_DISCUSSION_ROUNDS = 4;
+/** Which step of a discussion a call or an answer belongs to. `rounds` counts the first answers too. */
+export type DiscussionStep = { round: number | 'summary'; rounds: number };
 // Key order matches the record example in the design doc; records.jsonl prints it as-is.
 // A 'notice' is the app speaking in the group (from "system"), e.g. the outcome of a memory write.
 // `model` and `effort` are on answers only, and only when the bot reported them.
-export type ChatMessage = { seq: number; id: string; ts: string; from: string; type: 'user' | 'reply' | 'failure' | 'notice'; replyTo?: number; content: string; model?: string; effort?: string };
-export type RoundInput = { message: PendingMessage; history: ChatMessage[] };
-export type BotReply = { reply: string; memoryRequests?: MemoryRequest[]; model?: string; effort?: string };
+// `discussion` marks an answer given in a discussion: its step, or 'summary'.
+export type ChatMessage = { seq: number; id: string; ts: string; from: string; type: 'user' | 'reply' | 'failure' | 'notice'; replyTo?: number; content: string; model?: string; effort?: string; discussion?: number | 'summary' };
+// `step` is set during a discussion; the prompt then carries the discussion instructions.
+export type RoundInput = { message: PendingMessage; history: ChatMessage[]; step?: DiscussionStep };
+// `moreToSay` matters only in discussion steps; a bot that does not say counts as having more.
+export type BotReply = { reply: string; memoryRequests?: MemoryRequest[]; model?: string; effort?: string; moreToSay?: boolean };
 // `model` and `effort` are what the group asks this bot to use; absent means the bot's own default.
 // `webSearch` and `keepSessions` are the group's switches; absent means off.
 export type Bot = (input: RoundInput & { prompt?: string; stable?: string; model?: string; effort?: string; webSearch?: boolean; keepSessions?: boolean }) => Promise<string | BotReply>;
@@ -27,13 +35,19 @@ export type Bot = (input: RoundInput & { prompt?: string; stable?: string; model
 // prompt, or the reason that bot must not be called this round.
 // `stable`, when given, is the leading part of `prompt` that rarely changes between rounds.
 export type Prepare = (input: RoundInput) => Promise<Record<string, { prompt: string; stable?: string } | { error: string }>>;
-export type RoundState = { messageId: string; userSeq: number; pending: string[] };
+export type RoundState = { messageId: string; userSeq: number; pending: string[]; step?: DiscussionStep };
 // What a UI needs to stay current. Emitted only after the change is on disk.
 export type SchedulerEvent =
   | { type: 'message'; message: ChatMessage }
   | { type: 'queue'; queue: PendingMessage[] }
   | { type: 'round'; round: RoundState | null };
-export type SchedulerOptions = { prepare?: Prepare; maxMessageTokens?: number; applyMemory?: ApplyMemory; onEvent?: (event: SchedulerEvent) => void };
+export type DiscussionOptions = {
+  /** Writes the summary when it took part; otherwise the first bot that answered does. */
+  defaultWriter: string;
+  /** Asked before each new step and before the summary; a reason means stop (e.g. a usage limit nearly reached). */
+  canContinue?: (bots: string[]) => string | undefined;
+};
+export type SchedulerOptions = { prepare?: Prepare; maxMessageTokens?: number; applyMemory?: ApplyMemory; onEvent?: (event: SchedulerEvent) => void; discussion?: DiscussionOptions };
 /** The group was deleted; nothing more can be done in it. */
 export class GroupRetiredError extends Error {
   constructor() { super('这个群已删除'); this.name = 'GroupRetiredError'; }
@@ -42,13 +56,15 @@ export class GroupRetiredError extends Error {
 export class NotQueuedError extends Error {
   constructor() { super('Message is no longer queued'); this.name = 'NotQueuedError'; }
 }
-type ActiveRound ={ message: PendingMessage; userSeq: number; outstanding: string[] };
+type ActiveRound = { message: PendingMessage; userSeq: number; outstanding: string[]; step?: DiscussionStep };
 type Event =
   | { kind: 'enqueue'; message: PendingMessage }
   | { kind: 'remove' | 'top'; id: string }
   | { kind: 'start'; message: PendingMessage; user: ChatMessage }
   | { kind: 'result'; bot: string; message: ChatMessage }
   | { kind: 'notice'; message: ChatMessage }
+  // A discussion goes on to its next step (or the summary) with these bots.
+  | { kind: 'step'; step: DiscussionStep; bots: string[] }
   | { kind: 'finish' };
 
 // One instance per group. The journal is authoritative: dequeue + chat insertion
@@ -64,6 +80,9 @@ export class Scheduler {
   #prepare: Prepare | undefined;
   #maxMessageTokens: number;
   #applyMemory: ApplyMemory | undefined;
+  #discussion: DiscussionOptions | undefined;
+  // Set by stopDiscussion() for the round in progress. Not journaled: a restart ends the round anyway.
+  #stopRequested = false;
   #onEvent: ((event: SchedulerEvent) => void) | undefined;
   #queue: PendingMessage[] = [];
   #history: ChatMessage[] = [];
@@ -84,6 +103,7 @@ export class Scheduler {
     this.#prepare = options.prepare;
     this.#maxMessageTokens = options.maxMessageTokens ?? DEFAULT_MAX_MESSAGE_TOKENS;
     this.#applyMemory = options.applyMemory;
+    this.#discussion = options.discussion;
     this.#onEvent = options.onEvent;
   }
 
@@ -140,7 +160,8 @@ export class Scheduler {
   /** True after a storage failure: every further call fails until the group is opened again. */
   get needsReopen(): boolean { return this.#poisoned; }
   get round(): RoundState | null {
-    return this.#active ? { messageId: this.#active.message.id, userSeq: this.#active.userSeq, pending: [...this.#active.outstanding] } : null;
+    if (!this.#active) return null;
+    return { messageId: this.#active.message.id, userSeq: this.#active.userSeq, pending: [...this.#active.outstanding], ...(this.#active.step ? { step: { ...this.#active.step } } : {}) };
   }
 
   // A listener that throws must not disturb scheduling.
@@ -150,7 +171,7 @@ export class Scheduler {
     if (event.kind === 'enqueue' || event.kind === 'remove' || event.kind === 'top' || event.kind === 'start') send({ type: 'queue', queue: this.#queue });
     if (event.kind === 'start') send({ type: 'message', message: event.user });
     if (event.kind === 'result' || event.kind === 'notice') send({ type: 'message', message: event.message });
-    if (event.kind === 'start' || event.kind === 'result' || event.kind === 'finish') send({ type: 'round', round: this.round });
+    if (event.kind === 'start' || event.kind === 'result' || event.kind === 'step' || event.kind === 'finish') send({ type: 'round', round: this.round });
   }
   get queue(): PendingMessage[] { return structuredClone(this.#queue); }
   get history(): ChatMessage[] { return structuredClone(this.#history); }
@@ -191,7 +212,7 @@ export class Scheduler {
       this.#queue = this.#queue.filter(m => m.id !== event.message.id);
       this.#history.push(event.user);
       this.#nextSeq = event.user.seq + 1;
-      this.#active = { message: event.message, userSeq: event.user.seq, outstanding: [...event.message.targets] };
+      this.#active = { message: event.message, userSeq: event.user.seq, outstanding: [...event.message.targets], ...(discussing(event.message) ? { step: { round: 1, rounds: event.message.discuss! + 1 } } : {}) };
     } else if (event.kind === 'result') {
       if (!this.#active?.outstanding.includes(event.bot)) throw new Error('Invalid result event');
       this.#history.push(event.message);
@@ -201,6 +222,10 @@ export class Scheduler {
       if (!this.#active) throw new Error('Invalid notice event');
       this.#history.push(event.message);
       this.#nextSeq = event.message.seq + 1;
+    } else if (event.kind === 'step') {
+      if (!this.#active || this.#active.outstanding.length || !event.bots.length) throw new Error('Invalid step event');
+      this.#active.outstanding = [...event.bots];
+      this.#active.step = { ...event.step };
     } else if (event.kind === 'finish') {
       if (!this.#active || this.#active.outstanding.length) throw new Error('Cannot finish incomplete round');
       this.#active = undefined;
@@ -212,16 +237,18 @@ export class Scheduler {
       id: message.id,
       content: message.content,
       targets: message.targets ? [...message.targets] : resolveTargets(message.content, Object.keys(this.#bots)),
+      ...(message.discuss === undefined ? {} : { discuss: message.discuss }),
     };
     return this.#serial(async () => {
       if (!copy.id || !copy.content.trim() || !copy.targets.length || new Set(copy.targets).size !== copy.targets.length || copy.targets.some(bot => typeof this.#bots[bot] !== 'function')) throw new Error('Invalid message or bot targets');
+      if (copy.discuss !== undefined && !(Number.isInteger(copy.discuss) && copy.discuss >= 1 && copy.discuss <= MAX_DISCUSSION_ROUNDS)) throw new RangeError(`讨论回合数只能是 1 到 ${MAX_DISCUSSION_ROUNDS}`);
       // A message enters every later prompt once it is in the history, so one
       // oversized message would get every following round refused. Stop it here.
       const tokens = estimateTokens(copy.content);
       if (tokens > this.#maxMessageTokens) throw new MessageTooLongError(tokens, this.#maxMessageTokens);
       const previous = this.#seen.get(copy.id);
       if (previous) {
-        if (previous.content !== copy.content || previous.targets.join('\0') !== copy.targets.join('\0')) throw new Error('Message ID reused with different payload');
+        if (previous.content !== copy.content || previous.targets.join('\0') !== copy.targets.join('\0') || previous.discuss !== copy.discuss) throw new Error('Message ID reused with different payload');
         return false;
       }
       await this.#record({ kind: 'enqueue', message: copy });
@@ -253,6 +280,18 @@ export class Scheduler {
     });
   }
 
+  /**
+   * Asks the discussion in progress to stop: the step that is running finishes,
+   * no new step starts, and the summary is written. False when no discussion
+   * is running or it is already at its summary.
+   */
+  stopDiscussion(): boolean {
+    const step = this.#active?.step;
+    if (!step || step.round === 'summary' || this.#stopRequested) return false;
+    this.#stopRequested = true;
+    return true;
+  }
+
   moveToTop(id: string): Promise<void> {
     return this.#serial(async () => {
       if (!this.#queue.some(m => m.id === id)) throw new NotQueuedError();
@@ -274,61 +313,118 @@ export class Scheduler {
 
   async #drain(): Promise<void> {
     while (true) {
-      const input = await this.#serial(async () => {
+      const message = await this.#serial(async () => {
         if (this.#retired) return undefined;
         if (this.#poisoned) throw new Error('Storage failed; reopen scheduler before continuing');
         // Starting a round would overwrite the unfinished one and drop its missing answers.
         if (this.#active) throw new Error('Previous round is unfinished; reopen scheduler before continuing');
-        const message = this.#queue[0];
-        if (!message) return undefined;
-        await this.#record({ kind: 'start', message, user: { seq: this.#nextSeq, id: message.id, ts: new Date().toISOString(), from: 'user', type: 'user', content: message.content } });
-        return { message: structuredClone(message), history: structuredClone(this.#history) };
+        const next = this.#queue[0];
+        if (!next) return undefined;
+        this.#stopRequested = false;
+        await this.#record({ kind: 'start', message: next, user: { seq: this.#nextSeq, id: next.id, ts: new Date().toISOString(), from: 'user', type: 'user', content: next.content } });
+        return structuredClone(next);
       });
-      if (!input) return;
-      // Freeze the shared history before invoking any adapter. Each adapter gets
-      // its own copy so a mutation cannot contaminate another bot's input.
-      // All prompts are built before any bot starts, so bots in one round read
-      // the same history and memory even if a file changes mid-round.
-      let prepared: Awaited<ReturnType<Prepare>> | undefined;
-      let prepareError: string | undefined;
-      if (this.#prepare) {
-        try { prepared = await this.#prepare(structuredClone(input)); }
-        catch (error) { prepareError = error instanceof Error ? error.message : String(error); }
-      }
-      const results = await Promise.allSettled(input.message.targets.map(async bot => {
-        let type: 'reply' | 'failure' = 'reply';
-        let content: string;
-        let requests: MemoryRequest[] = [];
-        const answeredBy: { model?: string; effort?: string } = {};
-        try {
-          if (prepareError !== undefined) throw new Error(prepareError);
-          const entry = prepared?.[bot];
-          if (this.#prepare && !entry) throw new Error('没有为该 bot 准备上下文');
-          if (entry && 'error' in entry) throw new Error(entry.error);
-          const output = await this.#bots[bot]({ ...structuredClone(input), ...(entry ? { prompt: entry.prompt, ...(entry.stable === undefined ? {} : { stable: entry.stable }) } : {}) });
-          const reply = typeof output === 'string' ? output : output?.reply;
-          if (typeof reply !== 'string') throw new Error('Bot returned non-text output');
-          content = reply;
-          if (typeof output !== 'string') {
-            if (Array.isArray(output.memoryRequests)) requests = output.memoryRequests;
-            for (const key of ['model', 'effort'] as const) if (typeof output[key] === 'string' && output[key]) answeredBy[key] = output[key];
-          }
-        } catch (error) { type = 'failure'; content = error instanceof Error ? error.message : String(error); }
-        await this.#serial(async () => {
-          await this.#record({ kind: 'result', bot, message: { ...this.#result(bot, type, content), ...answeredBy } });
-          if (!requests.length) return;
-          // The file is written first and the notice recorded after. A crash in
-          // between loses the notice, never the memory; the file stays the truth.
-          let notices: string[];
-          if (!this.#applyMemory) notices = [`没有启用记忆写入，已忽略 ${bot} 的 ${requests.length} 条写记忆请求`];
-          else try { notices = await this.#applyMemory({ bot, targets: input.message.targets, requests }); }
-          catch (error) { notices = [`${bot} 的记忆写入失败：${error instanceof Error ? error.message : String(error)}`]; }
-          for (const notice of notices) await this.#record({ kind: 'notice', message: this.#result('system', 'notice', notice) });
-        });
-      }));
-      const failedWrite = results.find(result => result.status === 'rejected');
-      if (failedWrite?.status === 'rejected') throw failedWrite.reason;
+      if (!message) return;
+      const first = await this.#runStep(message, message.targets, this.#active?.step);
+      if (message.discuss !== undefined) await this.#discuss(message, first);
       await this.#serial(() => this.#record({ kind: 'finish' }));
     }
   }
+
+  /**
+   * Calls these bots once, all with the same frozen history, and records each
+   * answer. Returns, per bot, whether it answered and whether it has more to say.
+   */
+  async #runStep(message: PendingMessage, bots: string[], step: DiscussionStep | undefined): Promise<Map<string, { ok: boolean; moreToSay: boolean }>> {
+    // Freeze the shared history before invoking any adapter. Each adapter gets
+    // its own copy so a mutation cannot contaminate another bot's input.
+    // All prompts are built before any bot starts, so bots in one step read
+    // the same history and memory even if a file changes meanwhile.
+    const input: RoundInput = { message: structuredClone(message), history: structuredClone(this.#history), ...(step ? { step: { ...step } } : {}) };
+    let prepared: Awaited<ReturnType<Prepare>> | undefined;
+    let prepareError: string | undefined;
+    if (this.#prepare) {
+      // Only the bots called in this step get a prompt.
+      try { prepared = await this.#prepare({ ...structuredClone(input), message: { ...structuredClone(message), targets: [...bots] } }); }
+      catch (error) { prepareError = error instanceof Error ? error.message : String(error); }
+    }
+    const outcomes = new Map<string, { ok: boolean; moreToSay: boolean }>();
+    const results = await Promise.allSettled(bots.map(async bot => {
+      let type: 'reply' | 'failure' = 'reply';
+      let content: string;
+      let requests: MemoryRequest[] = [];
+      let moreToSay = true;
+      const answeredBy: { model?: string; effort?: string } = {};
+      try {
+        if (prepareError !== undefined) throw new Error(prepareError);
+        const entry = prepared?.[bot];
+        if (this.#prepare && !entry) throw new Error('没有为该 bot 准备上下文');
+        if (entry && 'error' in entry) throw new Error(entry.error);
+        const output = await this.#bots[bot]({ ...structuredClone(input), ...(entry ? { prompt: entry.prompt, ...(entry.stable === undefined ? {} : { stable: entry.stable }) } : {}) });
+        const reply = typeof output === 'string' ? output : output?.reply;
+        if (typeof reply !== 'string') throw new Error('Bot returned non-text output');
+        content = reply;
+        if (typeof output !== 'string') {
+          if (Array.isArray(output.memoryRequests)) requests = output.memoryRequests;
+          if (output.moreToSay === false) moreToSay = false;
+          for (const key of ['model', 'effort'] as const) if (typeof output[key] === 'string' && output[key]) answeredBy[key] = output[key];
+        }
+      } catch (error) { type = 'failure'; content = error instanceof Error ? error.message : String(error); }
+      outcomes.set(bot, { ok: type === 'reply', moreToSay });
+      await this.#serial(async () => {
+        await this.#record({ kind: 'result', bot, message: { ...this.#result(bot, type, content), ...answeredBy, ...(step ? { discussion: step.round } : {}) } });
+        // Only the answers to your own message may write memory. What bots say
+        // to each other in a discussion must not become long-term memory.
+        if (!requests.length || (step && step.round !== 1)) return;
+        // The file is written first and the notice recorded after. A crash in
+        // between loses the notice, never the memory; the file stays the truth.
+        let notices: string[];
+        if (!this.#applyMemory) notices = [`没有启用记忆写入，已忽略 ${bot} 的 ${requests.length} 条写记忆请求`];
+        else try { notices = await this.#applyMemory({ bot, targets: message.targets, requests }); }
+        catch (error) { notices = [`${bot} 的记忆写入失败：${error instanceof Error ? error.message : String(error)}`]; }
+        for (const notice of notices) await this.#notice(notice);
+      });
+    }));
+    const failedWrite = results.find(result => result.status === 'rejected');
+    if (failedWrite?.status === 'rejected') throw failedWrite.reason;
+    return outcomes;
+  }
+
+  #notice(text: string): Promise<void> {
+    return this.#record({ kind: 'notice', message: this.#result('system', 'notice', text) });
+  }
+
+  // After the first answers: more steps until a limit says stop, then a summary.
+  async #discuss(message: PendingMessage, first: Map<string, { ok: boolean; moreToSay: boolean }>): Promise<void> {
+    if (message.targets.length < 2) { await this.#serial(() => this.#notice('只有一个 bot，不讨论')); return; }
+    const rounds = message.discuss! + 1;
+    const answered = new Set([...first].filter(([, outcome]) => outcome.ok).map(([bot]) => bot));
+    let last = first;
+    let stopped: string | undefined;
+    for (let round = 2; round <= rounds; round++) {
+      const bots = message.targets.filter(bot => last.get(bot)?.ok);
+      if (this.#stopRequested) stopped = '已按你的要求停止讨论';
+      else if (bots.length < 2) stopped = '能继续讨论的 bot 不到两个';
+      // The first answers say nothing about the discussion, so at least one step always runs.
+      else if (round > 2 && bots.every(bot => last.get(bot)?.moreToSay === false)) stopped = '各 bot 都表示没有新的要说';
+      else stopped = this.#discussion?.canContinue?.(bots);
+      if (stopped) break;
+      await this.#serial(() => this.#record({ kind: 'step', step: { round, rounds }, bots }));
+      last = await this.#runStep(message, bots, { round, rounds });
+      for (const [bot, outcome] of last) if (outcome.ok) answered.add(bot);
+    }
+    if (stopped) await this.#serial(() => this.#notice(`讨论提前结束：${stopped}`));
+    // The summary: by the default writer if it took part, else by the first bot that did.
+    const writer = this.#discussion && answered.has(this.#discussion.defaultWriter) ? this.#discussion.defaultWriter : message.targets.find(bot => answered.has(bot));
+    if (!writer) { await this.#serial(() => this.#notice('没有 bot 成功参与讨论，不写小结')); return; }
+    const blocked = this.#discussion?.canContinue?.([writer]);
+    if (blocked) { await this.#serial(() => this.#notice(`不写小结：${blocked}`)); return; }
+    await this.#serial(() => this.#record({ kind: 'step', step: { round: 'summary', rounds }, bots: [writer] }));
+    await this.#runStep(message, [writer], { round: 'summary', rounds });
+  }
+}
+
+// A discussion needs a request for one and at least two bots to talk.
+function discussing(message: PendingMessage): boolean {
+  return message.discuss !== undefined && message.targets.length >= 2;
 }

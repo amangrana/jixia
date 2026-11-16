@@ -7,7 +7,7 @@ import { WebSocketServer } from 'ws';
 import { GroupBusyError, GroupNotFoundError } from './groups.ts';
 import { MemoryChangedError } from './memory.ts';
 import type { QuotaMonitor } from './quota.ts';
-import { GroupRetiredError, MessageTooLongError, NotQueuedError } from './scheduler.ts';
+import { GroupRetiredError, MAX_DISCUSSION_ROUNDS, MessageTooLongError, NotQueuedError } from './scheduler.ts';
 import type { Groups } from './groups.ts';
 
 // Local HTTP + WebSocket front for the browser. The browser sends commands
@@ -65,7 +65,7 @@ const MIME: Record<string, string> = {
 // The built web page. Anything that is not a file falls back to index.html.
 async function serveStatic(staticDir: string | undefined, pathname: string, response: ServerResponse): Promise<void> {
   const plain = (status: number, text: string) => { response.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); response.end(text); };
-  if (!staticDir) return plain(404, 'jixia 后端正在运行，但没有配置网页目录。');
+  if (!staticDir) return plain(404, '稷下的后端正在运行，但没有配置网页目录。');
   const base = resolve(staticDir);
   let relative: string;
   try { relative = decodeURIComponent(pathname); } catch { return plain(400, '地址格式不对'); }
@@ -82,7 +82,8 @@ async function serveStatic(staticDir: string | undefined, pathname: string, resp
   response.end(content);
 }
 
-export async function startServer(options: { groups: Groups; port: number; staticDir?: string; quota?: QuotaMonitor }): Promise<RunningServer> {
+// `onExit` is called after the reply to an exit request has gone out; `force` says whether answers in progress are being dropped.
+export async function startServer(options: { groups: Groups; port: number; staticDir?: string; quota?: QuotaMonitor; onExit?: (force: boolean) => void }): Promise<RunningServer> {
   const { groups } = options;
 
   async function route(request: IncomingMessage, url: URL): Promise<{ status?: number; body: unknown }> {
@@ -90,8 +91,18 @@ export async function startServer(options: { groups: Groups; port: number; stati
     const method = request.method ?? 'GET';
     const is = (verb: string, ...shape: (string | null)[]) => method === verb && parts.length === shape.length && shape.every((part, index) => part === null || part === parts[index]);
 
-    if (is('GET', 'api', 'status')) return { body: { bots: groups.bots } };
+    if (is('GET', 'api', 'status')) return { body: { bots: groups.bots, discussion: { rounds: groups.discussionRounds, max: MAX_DISCUSSION_ROUNDS } } };
     // Usage of each subscription, keyed by provider. Empty when no monitor runs.
+    if (is('POST', 'api', 'exit')) {
+      if (!options.onExit) throw new HttpError(404, '这个服务不能从页面退出');
+      const force = (await readJson(request)).force === true;
+      // Answers in progress would be cut off; say which groups, unless told to go ahead.
+      const busy = await groups.answering();
+      if (busy.length && !force) return { status: 409, body: { error: `${busy.map(group => group.name).join('、')} 正在回答，现在退出会中断这些回答`, code: 'busy', groups: busy } };
+      // After the reply has been sent, so the page learns that it worked.
+      setTimeout(() => options.onExit!(force), 100);
+      return { body: { exiting: true } };
+    }
     if (is('GET', 'api', 'memory')) return { body: { files: await groups.memory.list() } };
     if (is('PUT', 'api', 'memory', null)) {
       const body = await readJson(request);
@@ -111,6 +122,10 @@ export async function startServer(options: { groups: Groups; port: number; stati
         const records = history.slice(-pageSize(url.searchParams.get('limit')));
         return { group, records, hasMore: records.length < history.length, messageCount: history.length, queue: scheduler.queue, round: scheduler.round, selection: groups.selection(id), switches: groups.switches(id) };
       }) };
+    }
+    if (is('POST', 'api', 'groups', null, 'discussion', 'stop')) {
+      // The step running now finishes; then no new step starts and the summary is written.
+      return { body: { stopped: await groups.use(id, scheduler => scheduler.stopDiscussion()) } };
     }
     if (is('DELETE', 'api', 'groups', null)) {
       return { body: { group: await groups.remove(id) } };
@@ -140,7 +155,10 @@ export async function startServer(options: { groups: Groups; port: number; stati
       const body = await readJson(request);
       if (typeof body.id !== 'string' || !body.id || body.id.length > 100 || typeof body.content !== 'string' || !body.content.trim()) throw new HttpError(400, '消息需要 id 和非空的 content');
       // Routing reads the @ mentions; the client never chooses targets directly.
-      const queued = await groups.use(id, scheduler => scheduler.enqueue({ id: body.id as string, content: body.content as string }));
+      // `discuss`: how many discussion steps after the first answers; absent for a plain message.
+      if (body.discuss !== undefined && typeof body.discuss !== 'number') throw new HttpError(400, 'discuss 必须是数字');
+      const discuss = body.discuss as number | undefined;
+      const queued = await groups.use(id, scheduler => scheduler.enqueue({ id: body.id as string, content: body.content as string, ...(discuss === undefined ? {} : { discuss }) }));
       groups.kick(id);
       return { status: 202, body: { queued } };
     }

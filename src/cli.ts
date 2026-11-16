@@ -12,7 +12,8 @@ import type { MemoryRequest } from './memory.ts';
 export type Provider = 'claude' | 'codex';
 export type { MemoryRequest };
 /** `model` and `effort` say what answered; they are added by runCli, never taken from the bot's own output. */
-export type BotOutput = { reply: string; memoryRequests: MemoryRequest[]; model?: string; effort?: string };
+// `moreToSay` is the bot's own word on whether it has more to add; it matters only in discussion steps.
+export type BotOutput = { reply: string; memoryRequests: MemoryRequest[]; moreToSay: boolean; model?: string; effort?: string };
 
 /** Shown when no model was configured and the CLI does not report which one it used. */
 export const DEFAULT_MODEL_LABEL = '默认模型';
@@ -81,8 +82,9 @@ export const OUTPUT_SCHEMA = {
         additionalProperties: false,
       },
     },
+    moreToSay: { type: 'boolean' },
   },
-  required: ['reply', 'memoryRequests'],
+  required: ['reply', 'memoryRequests', 'moreToSay'],
   additionalProperties: false,
 } as const;
 
@@ -93,7 +95,8 @@ export function validateOutput(data: unknown): BotOutput {
   const fail = (why: string): never => { throw new CliError('invalid-output', `输出不符合约定格式：${why}`); };
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return fail('不是对象');
   const output = data as Record<string, unknown>;
-  if (!hasOnlyKeys(output, ['reply', 'memoryRequests'])) return fail('字段不对');
+  if (!hasOnlyKeys(output, ['reply', 'memoryRequests', 'moreToSay'])) return fail('字段不对');
+  if (typeof output.moreToSay !== 'boolean') return fail('moreToSay 不是 true 或 false');
   if (typeof output.reply !== 'string') return fail('reply 不是字符串');
   if (!Array.isArray(output.memoryRequests)) return fail('memoryRequests 不是数组');
   for (const request of output.memoryRequests) {
@@ -181,6 +184,18 @@ export type ProcessResult = {
 // Only the PID from this exact spawn, never a process name. /T takes the
 // console host and any tool subprocesses with it. Asynchronous so a slow
 // taskkill cannot stall other groups; its outcome is confirmed by `close`.
+// Every CLI process started by runProcess and not yet ended, so a forced exit can stop them:
+// on Windows a child keeps running (and spending quota) after the app is gone.
+const running = new Set<number>();
+
+/** Ends every CLI process still running. For a forced exit, when answers are being thrown away anyway. */
+export function stopAllProcesses(): number {
+  const pids = [...running];
+  for (const pid of pids) killTree(pid);
+  running.clear();
+  return pids.length;
+}
+
 function killTree(pid: number): void {
   if (process.platform === 'win32') {
     const killer = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10000 });
@@ -200,6 +215,8 @@ export const DEFAULT_GRACE_MS = 5000;
 export function runProcess(executable: string, args: string[], options: { cwd: string; input: string; timeoutMs: number; graceMs?: number; env?: NodeJS.ProcessEnv; kill?: (pid: number) => void }): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { cwd: options.cwd, env: options.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    if (child.pid !== undefined) running.add(child.pid);
+    child.once('exit', () => { if (child.pid !== undefined) running.delete(child.pid); });
     const graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
     let stdout = '', stderr = '', timedOut = false, settled = false;
     let grace: NodeJS.Timeout | undefined;

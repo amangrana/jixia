@@ -213,3 +213,17 @@ button:disabled { cursor: default; opacity: 0.5; }
 @media (max-width: 720px) {
   .memory-tabs, .memory-editor { padding-left: 16px; padding-right: 16px; }
 }
+
+/* Automatic discussion */
+.discuss { flex: none; display: inline-flex; align-items: center; gap: 6px; padding-bottom: 8px; color: var(--muted); font-size: 13px; }
+.discuss label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.discuss select { padding: 2px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font-size: 13px; }
+.stop-discussion { flex: none; padding: 3px 10px; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--accent); font-size: 13px; }
+.who .step { color: var(--accent); font-weight: 600; }
+.queue-tag { margin-right: 6px; padding: 0 6px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); font-size: 12px; }
+@media (max-width: 720px) { .composer { flex-wrap: wrap; } .discuss { order: 3; padding-bottom: 0; } }
+
+/* Exit */
+.brand-actions { display: inline-flex; gap: 6px; }
+.exited { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 16px; text-align: center; color: var(--muted); }
+.exited h1 { margin: 0 0 8px; color: var(--text); font-size: 22px; }

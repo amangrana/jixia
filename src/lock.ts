@@ -16,7 +16,7 @@ export class DataLockedError extends Error {
   readonly path: string;
   readonly owner: LockOwner;
   constructor(path: string, owner: LockOwner) {
-    super(`另一个 jixia（PID ${owner.pid}${owner.port ? `，端口 ${owner.port}` : ''}）正在使用这个数据目录。两个实例同时运行会写坏聊天记录，所以没有启动。确认没有别的 jixia 在运行的话，删掉 ${path} 再启动`);
+    super(`另一个稷下（PID ${owner.pid}${owner.port ? `，端口 ${owner.port}` : ''}）正在使用这个数据目录。两个实例同时运行会写坏聊天记录，所以没有启动。确认没有别的稷下在运行的话，删掉 ${path} 再启动`);
     this.name = 'DataLockedError';
     this.path = path;
     this.owner = owner;

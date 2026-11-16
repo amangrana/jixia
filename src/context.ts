@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { designatedWriter } from './routing.ts';
 import { estimateTokens } from './tokens.ts';
-import type { ChatMessage, Prepare } from './scheduler.ts';
+import type { ChatMessage, DiscussionStep, Prepare } from './scheduler.ts';
 
 // Builds the full prompt for one bot. Every call is a fresh headless session,
 // so everything the bot should know has to be in here.
@@ -37,9 +37,11 @@ export function checkSummary(summary: Summary, history: readonly ChatMessage[]):
 // One JSON object per line. JSON keeps a message that quotes another message
 // from being mistaken for a real one.
 export function renderMessage(message: ChatMessage): string {
-  if (message.type === 'failure') return JSON.stringify({ seq: message.seq, from: message.from, failed: true });
+  // An answer given in a discussion says which step it belongs to, so bots can tell the steps apart.
+  const step = message.discussion === undefined ? {} : { discussion: message.discussion };
+  if (message.type === 'failure') return JSON.stringify({ seq: message.seq, from: message.from, ...step, failed: true });
   // Notices come from the app ("system"), so bots know which memory writes went through.
-  return JSON.stringify({ seq: message.seq, from: message.from, content: message.content });
+  return JSON.stringify({ seq: message.seq, from: message.from, ...step, content: message.content });
 }
 
 export type PromptParts = {
@@ -54,8 +56,10 @@ export type PromptParts = {
   /** Full chat history up to, but not including, the current message. */
   history: readonly ChatMessage[];
   message: ChatMessage;
-  /** Bot allowed to write common memory this round. */
+  /** Bot allowed to write common memory this round; empty when nobody may (discussion steps). */
   writer: string;
+  /** The discussion instructions for this step, when the round is in a discussion past its first answers. */
+  discussion?: string;
 };
 
 const section = (title: string, body: string) => `# ${title}\n${body.trim() || '（空）'}\n`;
@@ -80,7 +84,8 @@ export function assembleParts(parts: PromptParts): { stable: string; changing: s
     ].join('\n'),
     changing: [
       section('摘要之后的原文', recent.map(renderMessage).join('\n')),
-      section('当前用户消息', `本轮可以写公共记忆的 bot：${parts.writer}\n${renderMessage(parts.message)}`),
+      section('当前用户消息', `本轮可以写公共记忆的 bot：${parts.writer || '无（讨论回合不写记忆）'}\n${renderMessage(parts.message)}`),
+      ...(parts.discussion ? [section('自动讨论', parts.discussion)] : []),
     ].join('\n'),
   };
 }
@@ -105,15 +110,31 @@ export type ContextSources = {
   bots: readonly string[];
   defaultWriter: string;
   maxPromptTokens?: number;
+  /** prompts/discussion.md: a "# 讨论回合" part and a "# 小结" part. Needed only for discussions. */
+  discussionPath?: string;
 };
+
+/** The instructions for one discussion step, from the template's two parts. */
+export function discussionInstructions(template: string, step: DiscussionStep): string {
+  const [rounds, summary] = template.split(/^# 小结[ \t]*$/m);
+  if (summary === undefined) throw new Error('讨论指令文件里缺少“# 小结”一节');
+  const text = step.round === 'summary' ? summary : rounds.replace(/^# 讨论回合[ \t]*$/m, '');
+  return text.replaceAll('{{round}}', String(step.round)).replaceAll('{{rounds}}', String(step.rounds)).trim();
+}
 
 // Reads every file once per round and builds all target bots' prompts before
 // any CLI starts, so bots in the same round see the same history and memory.
 export function createPreparer(sources: ContextSources): Prepare {
   const limit = sources.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS;
-  return async ({ message, history }) => {
-    const current = history.at(-1);
+  return async ({ message, history, step }) => {
+    // In a plain round, and in the first step of a discussion, the user's message
+    // is the last record. Later steps come after the first answers, which are
+    // then part of the record the bots respond to.
+    const later = step !== undefined && step.round !== 1;
+    const current = later ? history.find(record => record.id === message.id && record.type === 'user') : history.at(-1);
     if (!current || current.id !== message.id) throw new Error('本轮历史的最后一条不是当前消息');
+    const earlier = history.filter(record => record !== current);
+    const discussion = later ? discussionInstructions(await readFile(sources.discussionPath ?? '', 'utf8').catch(() => { throw new Error('读不到讨论指令文件 prompts/discussion.md'); }), step) : undefined;
     // Shared inputs fail the round for everyone. A bot's own memory is private
     // input, so an unreadable file there fails only that bot.
     const [system, common, summaryText, selves] = await Promise.all([
@@ -125,11 +146,12 @@ export function createPreparer(sources: ContextSources): Prepare {
     const summary = parseSummary(summaryText);
     try { checkSummary(summary, history); }
     catch (error) { throw new Error(`${(error as Error).message}。请修正或删除 ${sources.summaryPath}（删除后改用全部原文）`); }
-    const writer = designatedWriter(message.targets, sources.defaultWriter);
+    // Discussion steps after the first answers never write memory.
+    const writer = later ? '' : designatedWriter(message.targets, sources.defaultWriter);
     return Object.fromEntries(message.targets.map((bot, index) => {
       const self = selves[index];
       if (self.status === 'rejected') return [bot, { error: `无法读取 ${bot} 的各自记忆：${self.reason instanceof Error ? self.reason.message : String(self.reason)}` }];
-      const parts = { system, bot, bots: sources.bots, recordsPath: sources.recordsPath, common, self: self.value, summary, history: history.slice(0, -1), message: current, writer };
+      const parts = { system, bot, bots: sources.bots, recordsPath: sources.recordsPath, common, self: self.value, summary, history: earlier, message: current, writer, ...(discussion ? { discussion } : {}) };
       const { stable, changing } = assembleParts(parts);
       const prompt = `${stable}\n${changing}`;
       const tokens = estimateTokens(prompt);

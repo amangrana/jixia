@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { defaultRun, loadModels, openCodexAppServer } from './models.ts';
 import { createQuotaMonitor } from './quota.ts';
+import type { QuotaMonitor } from './quota.ts';
 import { fileURLToPath } from 'node:url';
 import { checkLogin } from './auth.ts';
 import { loadConfig } from './config.ts';
@@ -9,6 +10,7 @@ import { Groups } from './groups.ts';
 import { acquireDataLock, DataLockedError } from './lock.ts';
 import type { DataLock } from './lock.ts';
 import { startServer } from './server.ts';
+import { stopAllProcesses } from './cli.ts';
 import type { LoginStatus } from './auth.ts';
 import type { Provider } from './cli.ts';
 
@@ -42,14 +44,30 @@ const work = join(root, 'data', 'work');
 await mkdir(work, { recursive: true });
 const models = await loadModels({ cachePath: join(root, 'data', 'models.json'), providers: [...byProvider.keys()], workDir: work });
 
-const groups = await Groups.open({ root, config, logins, models });
+// The usage readings start after the groups are open, so a discussion asks for them when it needs them.
+let quota: QuotaMonitor | undefined;
+const groups = await Groups.open({ root, config, logins, models, usage: () => quota?.get() ?? {} });
 // Subscription usage, read now and every 5 minutes. No model is called.
 // Only for CLIs on a subscription login: an API-key login has no such limits.
-const quota = createQuotaMonitor({
+quota = createQuotaMonitor({
   providers: [...byProvider.keys()].filter(provider => groups.bots.some(bot => bot.provider === provider && bot.login.kind === 'subscription')),
   deps: { run: defaultRun(work), openCodex: openCodexAppServer(work) },
 });
 quota.start();
-const server = await startServer({ groups, port: config.port, staticDir: join(root, 'web', 'dist'), quota });
-console.log(`jixia 已启动，在浏览器里打开：http://127.0.0.1:${server.port}`);
+// The page's "退出稷下": stop polling, close the server, give up the lock, end.
+// A forced exit also ends CLI calls still running; their rounds are closed as
+// interrupted on the next start, as after any restart.
+let exiting = false;
+const exit = async (force: boolean) => {
+  if (exiting) return;
+  exiting = true;
+  quota?.stop();
+  if (force) stopAllProcesses();
+  try { await server.close(); } catch { /* exiting anyway */ }
+  lock.release();
+  console.log('稷下已退出');
+  process.exit(0);
+};
+const server = await startServer({ groups, port: config.port, staticDir: join(root, 'web', 'dist'), quota, onExit: force => void exit(force) });
+console.log(`稷下已启动，在浏览器里打开：http://127.0.0.1:${server.port}`);
 for (const bot of groups.bots) console.log(`  ${bot.name}（${bot.provider}）：${bot.enabled ? '已启用' : '未启用'}，${bot.login.detail}；${bot.models.note ?? `可选 ${bot.models.models.length} 个模型`}`);

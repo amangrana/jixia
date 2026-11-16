@@ -7,15 +7,16 @@ import type { CliConfig } from '../src/cli.ts';
 
 const config = (provider: 'claude' | 'codex', extra: Partial<CliConfig> = {}): CliConfig => ({ provider, workDir: 'W', readDir: 'R', timeoutMs: 1000, ...extra });
 const files = { schema: 'S.json', final: 'F.json' };
-const good = { reply: '你好', memoryRequests: [{ target: 'common', op: 'append', content: '偏好简短回答' }] };
+const good = { reply: '你好', memoryRequests: [{ target: 'common', op: 'append', content: '偏好简短回答' }], moreToSay: false };
 const invalid = (action: () => unknown) => assert.throws(action, (error: unknown) => error instanceof CliError && error.kind === 'invalid-output');
 
 test('output validation accepts the agreed shape and rejects everything else', () => {
   assert.deepEqual(validateOutput(good), good);
-  assert.deepEqual(validateOutput({ reply: '', memoryRequests: [] }), { reply: '', memoryRequests: [] });
+  assert.deepEqual(validateOutput({ reply: '', memoryRequests: [], moreToSay: true }), { reply: '', memoryRequests: [], moreToSay: true });
   for (const bad of [
-    null, 'text', [], { reply: 'x' }, { reply: 1, memoryRequests: [] }, { reply: 'x', memoryRequests: {} },
-    { reply: 'x', memoryRequests: [], extra: 1 },
+    null, 'text', [], { reply: 'x' }, { reply: 1, memoryRequests: [], moreToSay: true }, { reply: 'x', memoryRequests: {}, moreToSay: true },
+    { reply: 'x', memoryRequests: [] }, { reply: 'x', memoryRequests: [], moreToSay: 'no' },
+    { reply: 'x', memoryRequests: [], moreToSay: true, extra: 1 },
     { reply: 'x', memoryRequests: [{ target: 'claude', op: 'append', content: 'c' }] },
     { reply: 'x', memoryRequests: [{ target: 'self', op: 'replace', content: 'c' }] },
     { reply: 'x', memoryRequests: [{ target: 'self', op: 'append' }] },
@@ -34,7 +35,7 @@ test('Claude arguments open only Read, isolate local config and keep the empty s
   assert.equal(after('--model'), 'sonnet');
   assert.equal(after('--effort'), 'low');
   assert.equal(after('--output-format'), 'json');
-  assert.deepEqual(JSON.parse(after('--json-schema')).required, ['reply', 'memoryRequests']);
+  assert.deepEqual(JSON.parse(after('--json-schema')).required, ['reply', 'memoryRequests', 'moreToSay']);
   assert(!args.includes('--bare'));
   assert(!buildArgs(config('claude'), files).includes('--model'));
 });

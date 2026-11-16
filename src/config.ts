@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { parse } from 'yaml';
 import { MODEL_TOKEN } from './models.ts';
+import { MAX_DISCUSSION_ROUNDS } from './scheduler.ts';
 import type { Provider } from './cli.ts';
 
 export type BotConfig = { provider: Provider; model?: string; effort?: string };
@@ -10,6 +11,8 @@ export type CompactConfig = {
 };
 export type Config = {
   compact: CompactConfig;
+  /** `rounds`: how many steps a discussion goes on after the first answers, unless the message says (1 to 4). */
+  discussion: { rounds: number };
   port: number;
   bots: Record<string, BotConfig>;
   defaultWriter: string;
@@ -36,6 +39,7 @@ export const DEFAULT_CONFIG: Config = {
   keepCliSessions: false,
   webSearch: false,
   compact: { provider: 'claude', model: 'sonnet', effort: 'low', thresholdTokens: 40_000, keepRounds: 3, maxSummaryTokens: 4_000 },
+  discussion: { rounds: 2 },
 };
 
 // Bot names become file names (memory/<name>.md) and @ mentions, so keep them plain.
@@ -67,9 +71,21 @@ export function resolveConfig(raw: unknown): Config {
     for (const key of ['model', 'effort'] as const) if (bot[key] !== undefined && (typeof bot[key] !== 'string' || !MODEL_TOKEN.test(bot[key]))) throw new Error(`config.yaml：bot ${name} 的 ${key} 必须是模型或档位的名称，只含字母、数字和 . _ : - [ ]`);
   }
   config.compact = resolveCompact(input.compact);
+  config.discussion = resolveDiscussion(input.discussion);
   if (config.compact.maxSummaryTokens >= config.compact.thresholdTokens) throw new Error('config.yaml：compact.maxSummaryTokens 必须小于 compact.thresholdTokens');
   if (!(config.defaultWriter in config.bots)) throw new Error(`config.yaml：defaultWriter“${config.defaultWriter}”不在 bots 里`);
   return config;
+}
+
+function resolveDiscussion(raw: unknown): Config['discussion'] {
+  if (raw === undefined || raw === null) return { ...DEFAULT_CONFIG.discussion };
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config.yaml：discussion 必须是键值对');
+  const input = raw as Record<string, unknown>;
+  const unknown = Object.keys(input).filter(key => key !== 'rounds');
+  if (unknown.length) throw new Error(`config.yaml：discussion 里有不认识的配置项：${unknown.join('、')}`);
+  const rounds = input.rounds ?? DEFAULT_CONFIG.discussion.rounds;
+  if (!Number.isInteger(rounds) || (rounds as number) < 1 || (rounds as number) > MAX_DISCUSSION_ROUNDS) throw new Error(`config.yaml：discussion.rounds 必须是 1 到 ${MAX_DISCUSSION_ROUNDS} 的整数`);
+  return { rounds: rounds as number };
 }
 
 function resolveCompact(raw: unknown): CompactConfig {

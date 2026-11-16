@@ -1,9 +1,10 @@
 // All client state and how server data changes it. No DOM or React in here,
 // so the rules can be tested in Node (tests/web-state.test.ts).
 
-export type ChatMessage = { seq: number; id: string; ts: string; from: string; type: 'user' | 'reply' | 'failure' | 'notice'; replyTo?: number; content: string; model?: string; effort?: string };
-export type PendingMessage = { id: string; content: string; targets: string[] };
-export type RoundState = { messageId: string; userSeq: number; pending: string[] };
+export type ChatMessage = { seq: number; id: string; ts: string; from: string; type: 'user' | 'reply' | 'failure' | 'notice'; replyTo?: number; content: string; model?: string; effort?: string; discussion?: number | 'summary' };
+export type PendingMessage = { id: string; content: string; targets: string[]; discuss?: number };
+export type DiscussionStep = { round: number | 'summary'; rounds: number };
+export type RoundState = { messageId: string; userSeq: number; pending: string[]; step?: DiscussionStep };
 export type GroupInfo = { id: string; name: string; createdAt: string };
 export type ModelInfo = { id: string; name: string; efforts: string[]; defaultEffort?: string };
 export type ModelList = { models: ModelInfo[]; defaultEfforts: string[]; defaultModel?: { id: string; name: string }; defaultEffort?: string; note?: string };
@@ -54,6 +55,8 @@ export type State = {
   connected: boolean;
   groups: GroupInfo[];
   bots: BotStatus[];
+  /** Discussion steps offered by default, and the most a message may ask for. */
+  discussion: { rounds: number; max: number };
   activeId: string | null;
   byId: Record<string, GroupState>;
   unread: Record<string, true>;
@@ -67,7 +70,7 @@ export type Snapshot = { records: ChatMessage[]; hasMore: boolean; queue: Pendin
 export type Action =
   | { type: 'connection'; connected: boolean }
   | { type: 'groups'; groups: GroupInfo[] }
-  | { type: 'bots'; bots: BotStatus[] }
+  | { type: 'bots'; bots: BotStatus[]; discussion?: { rounds: number; max: number } }
   | { type: 'quotas'; quotas: Quotas }
   | { type: 'select'; id: string | null }
   /** `seen` is counters(state, id) taken when the request was sent. */
@@ -75,7 +78,7 @@ export type Action =
   | { type: 'older'; id: string; records: ChatMessage[]; hasMore: boolean }
   | { type: 'event'; event: ServerEvent };
 
-export const initialState: State = { connected: false, groups: [], bots: [], activeId: null, byId: {}, unread: {}, quotas: {}, memoryChanges: {} };
+export const initialState: State = { connected: false, groups: [], bots: [], activeId: null, byId: {}, unread: {}, quotas: {}, memoryChanges: {}, discussion: { rounds: 2, max: 4 } };
 const emptyGroup: GroupState = { loaded: false, records: [], hasMore: false, queue: [], round: null, error: null, queueEvents: 0, roundEvents: 0, selection: {}, selectionEvents: 0, switches: null, switchesEvents: 0 };
 
 export const groupState = (state: State, id: string): GroupState => state.byId[id] ?? emptyGroup;
@@ -111,7 +114,7 @@ const withGroup = (state: State, id: string, change: (group: GroupState) => Grou
 export function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'connection': return { ...state, connected: action.connected };
-    case 'bots': return { ...state, bots: action.bots };
+    case 'bots': return { ...state, bots: action.bots, ...(action.discussion ? { discussion: action.discussion } : {}) };
     case 'quotas': return { ...state, quotas: action.quotas };
     case 'groups': {
       // Keep the current group if it still exists; otherwise open the newest one.
@@ -259,4 +262,19 @@ export function memoryArrived(entry: MemoryEntry | undefined, file: MemoryFile):
 export function loadLatest(entry: MemoryEntry): MemoryEntry {
   const file = entry.latest ?? entry.saved;
   return { saved: file, text: file.content };
+}
+
+// ---- Automatic discussion ----
+
+/** Most calls a discussion can take: every bot at each step, plus one summary. */
+export function discussionCalls(bots: number, rounds: number): number {
+  return bots < 2 ? bots : bots * (rounds + 1) + 1;
+}
+
+/** The label on an answer given in a discussion. */
+export const stepLabel = (step: number | 'summary') => step === 'summary' ? '小结' : `第 ${step} 回合`;
+
+/** Progress shown by the group's title while a discussion runs. */
+export function discussionStatus(step: DiscussionStep): string {
+  return step.round === 'summary' ? '讨论中 · 写小结' : `讨论中 · 第 ${step.round}/${step.rounds} 回合`;
 }

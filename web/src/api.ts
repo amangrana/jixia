@@ -13,7 +13,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   try {
     response = await fetch(path, { method, headers: body === undefined ? undefined : { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   } catch {
-    throw new ApiError('offline', '连不上 jixia 后端，请确认它还在运行');
+    throw new ApiError('offline', '连不上稷下的后端，请确认它还在运行');
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new ApiError(data.code ?? 'internal', data.error ?? `请求失败（${response.status}）`, data);
@@ -22,7 +22,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 
 const group = (id: string) => `/api/groups/${encodeURIComponent(id)}`;
 export const api = {
-  status: () => call<{ bots: BotStatus[] }>('GET', '/api/status'),
+  status: () => call<{ bots: BotStatus[]; discussion: { rounds: number; max: number } }>('GET', '/api/status'),
   groups: () => call<{ groups: GroupInfo[] }>('GET', '/api/groups'),
   memory: () => call<{ files: MemoryFile[] }>('GET', '/api/memory'),
   saveMemory: (name: string, content: string, baseVersion: string) => call<{ file: MemoryFile }>('PUT', `/api/memory/${encodeURIComponent(name)}`, { content, baseVersion }),
@@ -32,7 +32,11 @@ export const api = {
   snapshot: (id: string) => call<Snapshot & { group: GroupInfo; messageCount: number }>('GET', group(id)),
   deleteGroup: (id: string) => call<{ group: GroupInfo }>('DELETE', group(id)),
   older: (id: string, before: number) => call<{ records: ChatMessage[]; hasMore: boolean }>('GET', `${group(id)}/records?before=${before}&limit=200`),
-  send: (id: string, messageId: string, content: string) => call<{ queued: boolean }>('POST', `${group(id)}/messages`, { id: messageId, content }),
+  /** `discuss`: discussion steps after the first answers; leave out for a plain message. */
+  send: (id: string, messageId: string, content: string, discuss?: number) => call<{ queued: boolean }>('POST', `${group(id)}/messages`, { id: messageId, content, ...(discuss === undefined ? {} : { discuss }) }),
+  stopDiscussion: (id: string) => call<{ stopped: boolean }>('POST', `${group(id)}/discussion/stop`),
+  /** Ends the app. Refused with code 'busy' while groups are answering, unless `force`. */
+  exit: (force: boolean) => call<{ exiting: boolean }>('POST', '/api/exit', { force }),
   remove: (id: string, messageId: string) => call<{ message: PendingMessage }>('DELETE', `${group(id)}/queue/${encodeURIComponent(messageId)}`),
   /** Only the fields given are changed; null means "let the CLI decide". */
   setSwitches: (id: string, change: Partial<Switches>) => call<{ switches: Switches }>('PUT', `${group(id)}/switches`, change),

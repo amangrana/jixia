@@ -3,7 +3,7 @@ import type { FormEvent, KeyboardEvent } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api, ApiError } from './api.ts';
-import { ageText, appendToDraft, estimateTokens, isDirty, loadLatest, memoryArrived, memoryLabel, completeMention, counters, defaultLabels, effortsFor, groupState, initialState, mentionAt, mentionOptions, quotaLevel, reducer, resetText } from './state.ts';
+import { ageText, appendToDraft, estimateTokens, isDirty, loadLatest, memoryArrived, memoryLabel, completeMention, counters, defaultLabels, effortsFor, groupState, initialState, mentionAt, mentionOptions, quotaLevel, reducer, resetText, discussionCalls, discussionStatus, stepLabel } from './state.ts';
 import type { BotStatus, ChatMessage, Choice, ChoiceChange, GroupState, MemoryEntry, MemoryFile, PendingMessage, QuotaState, Selection, ServerEvent, State, Switches } from './state.ts';
 
 // Unsent text per group. Kept in this browser so a reload does not lose it.
@@ -13,6 +13,14 @@ function loadDrafts(): Record<string, string> {
 }
 function saveDrafts(drafts: Record<string, string>): void {
   try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(Object.fromEntries(Object.entries(drafts).filter(([, text]) => text)))); } catch { /* private window: drafts just do not persist */ }
+}
+
+const ROUNDS_KEY = 'jixia.discussionRounds';
+function loadRounds(groupId: string): number | undefined {
+  try { const value = JSON.parse(localStorage.getItem(ROUNDS_KEY) ?? '{}')[groupId]; return Number.isInteger(value) ? value : undefined; } catch { return undefined; }
+}
+function saveRounds(groupId: string, rounds: number): void {
+  try { const all = JSON.parse(localStorage.getItem(ROUNDS_KEY) ?? '{}'); localStorage.setItem(ROUNDS_KEY, JSON.stringify({ ...all, [groupId]: rounds })); } catch { /* not kept: the default applies next time */ }
 }
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -26,6 +34,8 @@ export function App() {
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
   const [refreshingQuota, setRefreshingQuota] = useState(false);
   const [view, setView] = useState<'chat' | 'memory'>('chat');
+  const [exited, setExited] = useState(false);
+  const exitedRef = useRef(false);
   const memoryDirty = useRef(false);
   const markMemoryDirty = useCallback((dirty: boolean) => { memoryDirty.current = dirty; }, []);
   const nextToast = useRef(0);
@@ -58,9 +68,9 @@ export function App() {
         attempt = 0;
         dispatch({ type: 'connection', connected: true });
         try {
-          const [{ groups }, { bots }, { quotas }] = await Promise.all([api.groups(), api.status(), api.quota()]);
+          const [{ groups }, { bots, discussion }, { quotas }] = await Promise.all([api.groups(), api.status(), api.quota()]);
           dispatch({ type: 'groups', groups });
-          dispatch({ type: 'bots', bots });
+          dispatch({ type: 'bots', bots, discussion });
           dispatch({ type: 'quotas', quotas });
         } catch (error) { toast(errorText(error)); }
         const open = stateRef.current.activeId;
@@ -71,7 +81,8 @@ export function App() {
       };
       socket.onclose = () => {
         dispatch({ type: 'connection', connected: false });
-        if (!stopped) retry = setTimeout(connect, Math.min(5000, 500 * 2 ** attempt++));
+        // After 退出稷下 the backend is gone on purpose: no reconnecting.
+        if (!stopped && !exitedRef.current) retry = setTimeout(connect, Math.min(5000, 500 * 2 ** attempt++));
       };
     };
     connect();
@@ -88,9 +99,28 @@ export function App() {
     setView('chat');
     return true;
   };
+  // 退出稷下: ask first; if groups are answering, say which and ask again before cutting them off.
+  const exitApp = async () => {
+    if (view === 'memory' && memoryDirty.current && !window.confirm('记忆有未保存的修改，退出会丢掉这些修改。确定退出吗？')) return;
+    if (!window.confirm('退出稷下？后台程序会关闭，下次从桌面快捷方式启动。')) return;
+    try { await api.exit(false); }
+    catch (error) {
+      if (!(error instanceof ApiError && error.code === 'busy')) { toast(errorText(error)); return; }
+      if (!window.confirm(`${error.message}。被中断的回答下次启动时会记为“回答中断”。仍然退出吗？`)) return;
+      try { await api.exit(true); } catch (again) { toast(errorText(again)); return; }
+    }
+    exitedRef.current = true;
+    setExited(true);
+  };
+  if (exited) return (
+    <div className="exited">
+      <h1>稷下已退出</h1>
+      <p>可以关掉这个窗口了。下次从桌面快捷方式启动。</p>
+    </div>
+  );
   return (
     <div className="app">
-      <Sidebar state={state} memoryOpen={view === 'memory'} onMemory={() => { if (view === 'memory') leaveMemory(); else setView('memory'); }}
+      <Sidebar state={state} onExit={exitApp} memoryOpen={view === 'memory'} onMemory={() => { if (view === 'memory') leaveMemory(); else setView('memory'); }}
         onSelect={id => { if (leaveMemory()) dispatch({ type: 'select', id }); }} onCreate={async name => {
         if (!leaveMemory()) return false;
         try { const { group } = await api.createGroup(name); dispatch({ type: 'select', id: group.id }); return true; }
@@ -107,7 +137,7 @@ export function App() {
         {view === 'memory'
           ? <MemoryPage changes={state.memoryChanges} toast={toast} onClose={leaveMemory} onDirtyChange={markMemoryDirty} />
           : active
-          ? <Chat key={active.id} id={active.id} name={active.name} group={groupState(state, active.id)} bots={state.bots}
+          ? <Chat key={active.id} id={active.id} name={active.name} group={groupState(state, active.id)} bots={state.bots} discussionDefaults={state.discussion}
               draft={drafts[active.id] ?? ''} setDraft={change => setDraft(active.id, change)} toast={toast}
               onDelete={async () => {
                 try {
@@ -127,9 +157,9 @@ export function App() {
   );
 }
 
-function Sidebar({ state, onSelect, onCreate, onRefreshQuota, refreshing, memoryOpen, onMemory }: {
+function Sidebar({ state, onSelect, onCreate, onRefreshQuota, refreshing, memoryOpen, onMemory, onExit }: {
   state: State; onSelect: (id: string) => void; onCreate: (name: string) => Promise<boolean>; onRefreshQuota: () => void; refreshing: boolean;
-  memoryOpen: boolean; onMemory: () => void;
+  memoryOpen: boolean; onMemory: () => void; onExit: () => void;
 }) {
   const [name, setName] = useState('');
   const [creating, setCreating] = useState(false);
@@ -143,8 +173,11 @@ function Sidebar({ state, onSelect, onCreate, onRefreshQuota, refreshing, memory
   return (
     <aside className="sidebar">
       <div className="brand-row">
-        <h1 className="brand">jixia</h1>
-        <button className={memoryOpen ? "memory-button active" : "memory-button"} onClick={onMemory} aria-pressed={memoryOpen} title="查看和编辑长期记忆">记忆</button>
+        <h1 className="brand">稷下</h1>
+        <span className="brand-actions">
+          <button className={memoryOpen ? "memory-button active" : "memory-button"} onClick={onMemory} aria-pressed={memoryOpen} title="查看和编辑长期记忆">记忆</button>
+          <button className="memory-button" onClick={onExit} title="关闭稷下的后台程序；下次从桌面快捷方式启动">退出</button>
+        </span>
       </div>
       <form className="new-group" onSubmit={submit}>
         <input value={name} onChange={event => setName(event.target.value)} placeholder="新群的名字" maxLength={100} aria-label="新群的名字" />
@@ -202,8 +235,8 @@ function QuotaBars({ state }: { state: QuotaState }) {
   );
 }
 
-function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder, onDelete }: {
-  id: string; name: string; group: GroupState; bots: BotStatus[]; draft: string;
+function Chat({ id, name, group, bots, discussionDefaults, draft, setDraft, toast, onOlder, onDelete }: {
+  id: string; name: string; group: GroupState; bots: BotStatus[]; discussionDefaults: { rounds: number; max: number }; draft: string;
   setDraft: (change: (draft: string) => string) => void; toast: (text: string) => void;
   onOlder: (records: ChatMessage[], hasMore: boolean) => void; onDelete: () => void;
 }) {
@@ -244,6 +277,12 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder, onDelete
     element.style.overflowY = wanted > element.offsetHeight + 1 ? 'auto' : 'hidden';
   }, [draft]);
 
+  // Automatic discussion for the next message: off by default. The number of
+  // rounds is remembered per group in this browser, like the draft.
+  const [discuss, setDiscuss] = useState(false);
+  const [rounds, setRoundsState] = useState(() => loadRounds(id) ?? discussionDefaults.rounds);
+  const setRounds = (value: number) => { setRoundsState(value); saveRounds(id, value); };
+  const usableCount = bots.filter(bot => bot.enabled).length;
   const send = async () => {
     const content = draft.trim();
     if (!content) return;
@@ -252,7 +291,9 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder, onDelete
     setDraft(() => '');
     stick.current = true;
     try {
-      await api.send(id, crypto.randomUUID(), content);
+      await api.send(id, crypto.randomUUID(), content, discuss ? rounds : undefined);
+      // A discussion costs several calls; the next message is a plain one unless ticked again.
+      setDiscuss(false);
     } catch (error) {
       // Nothing was queued, so the text goes back, ahead of anything typed since.
       setDraft(current => current.trim() ? `${content}\n${current}` : content);
@@ -328,7 +369,11 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder, onDelete
     <>
       <header className="chat-header">
         <h2>{name}</h2>
-        {group.round && <span className="status">正在回答 · 还差 {group.round.pending.length} 个</span>}
+        {group.round && <span className="status">{group.round.step ? discussionStatus(group.round.step) : '正在回答'} · 还差 {group.round.pending.length} 个</span>}
+        {group.round?.step && group.round.step.round !== 'summary' && (
+          <button className="stop-discussion" title="正在进行的回合会跑完，之后不再开新回合，直接写小结"
+            onClick={async () => { try { if (!(await api.stopDiscussion(id)).stopped) toast('讨论已经在收尾了'); else toast('当前回合结束后停止讨论，然后写小结'); } catch (error) { toast(errorText(error)); } }}>停止讨论</button>
+        )}
         <button className="delete-group" onClick={onDelete} disabled={!!group.round} title={group.round ? '这个群正在回答，等这一轮结束后再删' : '删除这个群'}>删除群</button>
       </header>
       {group.error && <div className="banner error" role="alert">{group.error}</div>}
@@ -351,7 +396,7 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder, onDelete
           <ol>
             {group.queue.map((message, index) => (
               <li key={message.id}>
-                <span className="queue-text">{message.content}</span>
+                <span className="queue-text">{message.discuss !== undefined && <span className="queue-tag">讨论 {message.discuss} 回合</span>}{message.content}</span>
                 <span className="queue-actions">
                   <button onClick={() => queueAction(() => api.moveToTop(id, message.id))} disabled={index === 0} title="当前这轮结束后先处理这条">移到队首</button>
                   <button onClick={() => edit(message)} title="取回到输入框，重新发送后排到队尾">编辑</button>
@@ -393,6 +438,12 @@ function Chat({ id, name, group, bots, draft, setDraft, toast, onOlder, onDelete
           onCompositionStart={() => setComposing(true)} onCompositionEnd={event => { setComposing(false); trackCaret(event.currentTarget); }}
           role="combobox" aria-expanded={listOpen} aria-autocomplete="list"
           placeholder={group.round ? '可以继续发，消息会排队' : '发消息，Enter 发送'} title="Enter 发送，Shift+Enter 换行，输入 @ 选择 bot" aria-label="消息" />
+        <span className="discuss" title={usableCount < 2 ? '需要至少两个可用的 bot' : `勾上后这条消息会让 bot 互相讨论，最多约 ${discussionCalls(usableCount, rounds)} 次调用`}>
+          <label><input type="checkbox" checked={discuss} disabled={usableCount < 2} onChange={event => setDiscuss(event.target.checked)} /> 讨论</label>
+          <select aria-label="讨论回合数" value={rounds} disabled={usableCount < 2} onChange={event => setRounds(Number(event.target.value))}>
+            {Array.from({ length: discussionDefaults.max }, (_, index) => index + 1).map(value => <option key={value} value={value}>{value} 回合</option>)}
+          </select>
+        </span>
         <button type="submit" disabled={!draft.trim()}>发送</button>
       </form>
     </>
@@ -459,6 +510,7 @@ function Message({ message, botIndex }: { message: ChatMessage; botIndex: number
     <div className={`row bot tone-${botIndex % 4}`}>
       <div className="who">
         {message.from}
+        {message.discussion !== undefined && <span className="meta step">{stepLabel(message.discussion)}</span>}
         {message.model && <span className="meta model" title="回答这条消息的模型">{message.model}{message.effort ? ` · ${message.effort}` : ''}</span>}
         <span className="meta">{clock(message.ts)}</span>
       </div>

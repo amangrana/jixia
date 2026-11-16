@@ -3,7 +3,7 @@
 // folder that is removed on exit.
 //   npm run build
 //   node tests/ui-mock-server.mjs [port]
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,7 @@ const project = dirname(dirname(fileURLToPath(import.meta.url)));
 const root = await mkdtemp(join(tmpdir(), 'jixia-ui-'));
 await mkdir(join(root, 'prompts'));
 await writeFile(join(root, 'prompts', 'system.md'), '你是 {{self}}');
+await copyFile(join(project, 'prompts', 'discussion.md'), join(root, 'prompts', 'discussion.md'));
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 // What a bot does depends on words in the message, so each UI state can be reached by hand:
 //   慢 -> answers after 8s, 很慢 -> after 40s (time to queue more messages)   失败 -> chatgpt fails
@@ -54,7 +55,7 @@ const quota = createQuotaMonitor({ providers: ['claude', 'codex'], deps: {
   openCodex: async () => ({ request: async method => { if (method === 'initialize') return {}; if (codexReads++) throw new Error('模拟：查询超时'); return { rateLimits: { primary: { usedPercent: 20, windowDurationMins: 300, resetsAt: Date.now() / 1000 + 7200 }, secondary: { usedPercent: 17, windowDurationMins: 10080, resetsAt: Date.now() / 1000 + 400000 } } }; }, close: () => {} }),
 } });
 quota.start();
-const server = await startServer({ groups, port: Number(process.argv[2] ?? 4599), staticDir: join(project, 'web', 'dist'), quota });
+const server = await startServer({ groups, port: Number(process.argv[2] ?? 4599), staticDir: join(project, 'web', 'dist'), quota, onExit: () => void stop() });
 console.log(`jixia UI (mock bots): http://127.0.0.1:${server.port}`);
 const stop = async () => { await server.close(); await rm(root, { recursive: true, force: true }); process.exit(0); };
 process.on('SIGINT', stop);
