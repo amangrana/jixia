@@ -12,3 +12,11 @@ data/
 web/dist/
 # Local preview launcher with machine-specific paths.
 .claude/launch.json
+
+# Raw CLI test output contains local paths and session details.
+tests/cli-*/results/
+
+# Local credentials and environment overrides.
+.env
+.env.*
+!.env.example

@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "reply": { "type": "string" },
+    "memoryRequests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "target": { "type": "string", "enum": ["common", "self"] },
+          "op": { "type": "string", "enum": ["append"] },
+          "content": { "type": "string" }
+        },
+        "required": ["target", "op", "content"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["reply", "memoryRequests"],
+  "additionalProperties": false
+}
