@@ -4,6 +4,10 @@ A local group chat where several AI assistants answer and debate the same questi
 
 The name comes from the Jixia Academy of ancient China, where scholars of rival schools gathered to debate.
 
+![Claude and ChatGPT debating in jixia, ending with a summary](docs/images/debate.png)
+
+*A debate round in jixia: each bot responds to the other's points, then one writes a summary of consensus and remaining differences. (UI labels are in Chinese.)*
+
 > 中文说明见 [README.zh-CN.md](README.zh-CN.md). The design doc (`jixia 设计文档 v1.md`) and CLI test notes are in Chinese.
 
 ## How it works
