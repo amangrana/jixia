@@ -4,7 +4,7 @@
 
 ## 启动
 
-需要 Node 24 或更新版本，以及已用订阅登录的 Claude Code 和 Codex CLI。
+需要 Windows、Node 24 或更新版本，以及已用订阅登录的 Claude Code 和 Codex CLI。只在 Windows 上开发和测试过：Codex 的调用用了 Windows 沙箱设置，快捷方式脚本是 PowerShell。
 
 ```powershell
 npm install
@@ -20,7 +20,7 @@ npm start
 
 然后在浏览器里打开 http://127.0.0.1:4517 。`npm run build` 生成网页，只在第一次和改了 `web/` 之后需要运行。
 
-后端只监听 `127.0.0.1`，默认端口 4517。启动时会查询两个 CLI 的登录类型并打印出来；不是订阅登录的 bot 不会启用。配置见 `config.example.yaml`，复制为 `config.yaml` 后修改，没有这个文件时全部用默认值。聊天记录和记忆在 `data/` 下，不进 git。设计见 `jixia 设计文档 v1.md`，测试证据见 `jixia CLI 实测记录.md`。
+后端只监听 `127.0.0.1`，默认端口 4517。启动时会查询两个 CLI 的登录类型并打印出来；不是订阅登录的 bot 不会启用。配置见 `config.example.yaml`，复制为 `config.yaml` 后修改，没有这个文件时全部用默认值。`config.yaml` 和 `data/` 下的聊天记录、记忆都不进 git。设计见 `jixia 设计文档 v1.md`，测试证据见 `jixia CLI 实测记录.md`。
 
 同一个 `data/` 同时只能运行一个 jixia。已经有一个在运行时，再次 `npm start` 会提示占用它的进程号并退出，不会碰任何数据，即使换了端口也一样。锁文件是 `data/jixia.lock`：正常退出时自动删除；异常退出后留下的会在下次启动时自动接管。极少数情况下（Windows 复用了进程号）提示被占用而实际没有 jixia 在运行，删掉这个文件即可。
 
@@ -37,7 +37,7 @@ npm start
 
 退出接口是 `POST /api/exit`，可带 `{force: true}`；有群正在回答且没带 force 时返回 409 `busy` 和这些群。只有 `src/main.ts` 启动的服务提供它。
 
-脚本存成带 BOM 的 UTF-8：快捷方式用的是 Windows 自带的 PowerShell 5.1，没有 BOM 时它会把中文读成乱码，脚本无法运行。重新创建快捷方式：目标是 `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File <jixia 文件夹>scriptsstart-jixia.ps1`，图标选 `scriptsjixia.ico`。
+脚本存成带 BOM 的 UTF-8：快捷方式用的是 Windows 自带的 PowerShell 5.1，没有 BOM 时它会把中文读成乱码，脚本无法运行。重新创建快捷方式：目标是 `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File <jixia 文件夹>\scripts\start-jixia.ps1`，图标选 `scripts\jixia.ico`。
 
 ## 运行核心测试
 
@@ -58,7 +58,6 @@ npm test
 - 在词首输入 `@` 时弹出可选的 bot 和 `@all`，继续输入字母会过滤。↑↓ 选择，Enter 或 Tab 补全，Esc 关掉列表；Backspace 照常删字，删掉 `@` 时列表消失。
 - 连接断开时顶部有提示，并自动重连；重连后重新拉取当前群的记录和队列。断线期间新增的记录太多、接不上已显示的记录时，只保留最新的一段，往上翻“加载更早的记录”即可补齐。
 - 发送失败或消息过长时，文字留在输入框里。没发出去的草稿按群保存在浏览器里，刷新不丢。
-- 连接断开时顶部有提示，并自动重连；重连后重新拉取当前群的记录和队列。
 - 输入框上方每个可用的 bot 有两个下拉框：模型和 effort。选择属于当前这个群，改了之后一直保持，重启后还在；对之后开始的每一轮生效，包括已经在排队的消息，正在进行的一轮不受影响。“默认”表示不指定，由 CLI 决定。effort 只列出所选模型支持的档位，换模型后不再支持的 effort 回到默认。
 - 下拉框的“默认”项写出 CLI 自己的默认值，例如“默认（Opus 5.5）”“默认（low）”；CLI 不报告的（Claude 的默认 effort）只写“默认”。
 - 新建群时套用 `config.yaml` 里各 bot 的 `model` 和 `effort`。这两项可以不写：不写时新群选“默认”，跟随 CLI 的默认模型，CLI 升级换了默认时也跟着换。
@@ -312,4 +311,4 @@ node tests/usage-live.mjs
 
 重启时保留已保存的回答，为未完成的 bot 写入“回答中断”，不自动重试；排队消息继续保留，调用 runUntilIdle 后处理。没有换行的未完成日志尾部会修复；其他解析错误阻止加载。写事件日志的任何一步失败（打开、写入、落盘、关闭）之后，`needsReopen` 变为 true，这个实例的所有调用都会报错，调用方需要重新 `Scheduler.open`：重放磁盘上的事件，未完成的轮次记为“回答中断”，排队消息保留。未提供磁盘配额、日志轮转或多进程写入支持。
 
-CLI 探测脚本在 `tests/cli-*` 中，运行这些脚本会实际调用模型并消耗额度；与核心的模拟测试不同。原始结果保留用于其他 agent 审查，可能包含本机测试路径，但不应保存认证密钥。
+CLI 探测脚本在 `tests/cli-*` 中，运行这些脚本会实际调用模型并消耗额度；与核心的模拟测试不同。脚本和整理后的记录（`jixia CLI 实测记录.md`）进 git；原始结果写在各脚本的 `results/` 下，可能包含本机路径，不进 git。

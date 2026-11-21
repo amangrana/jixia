@@ -20,3 +20,6 @@ tests/cli-*/results/
 .env
 .env.*
 !.env.example
+
+# Local settings; copy config.example.yaml to create it.
+config.yaml
