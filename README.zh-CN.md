@@ -2,6 +2,8 @@
 
 程序里显示的名字是“稷下”，项目和代码里仍叫 jixia。当前可以在浏览器里使用：多个群、@ 路由、消息排队、长期记忆、对话过长时的自动压缩都已接通。
 
+这个项目是我指挥 AI 编程 agent（Claude Code 和 Codex）写成的：需求和约束、设计文档、关键的设计取舍、审查 agent 的工作，以及测试策略和验收由我负责。
+
 ## 启动
 
 需要 Windows、Node 24 或更新版本，以及已用订阅登录的 Claude Code 和 Codex CLI。只在 Windows 上开发和测试过：Codex 的调用用了 Windows 沙箱设置，快捷方式脚本是 PowerShell。

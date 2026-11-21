@@ -17,6 +17,16 @@ The browser talks only to a local Node.js backend. The backend routes each messa
 - **Compaction**: when a conversation grows past a token budget, older turns are summarized and the last few rounds are kept verbatim.
 - **Quota display**: 5-hour and weekly subscription usage for each CLI, refreshed every 5 minutes without spending quota.
 
+## How it was built
+
+jixia was built by directing AI coding agents (Claude Code and Codex). My part was the requirements and constraints, the design doc, the design decisions and trade-offs, reviewing the agents' work, and the test strategy and acceptance checks. Key decisions:
+
+- **Subscription CLIs, not APIs.** Bots run through the official Claude Code and Codex CLIs on my own subscriptions, so there is no API billing; the trade-off is process management (timeouts, process-tree cleanup, a global concurrency cap). A product version would need to move to the APIs.
+- **One-shot headless calls.** Every turn is a fresh CLI call that exits after answering, with history and memory assembled by the backend, instead of long-running CLI sessions. This keeps each bot's context explicit and makes crashes recoverable.
+- **Bots read, the backend writes.** Bots can only read files. They *propose* memory writes in a structured field, and the backend validates the target and writes the file, so a bot can never edit another bot's memory or its own instructions.
+- **Debate rounds don't write memory.** Only a bot's direct reply to me may propose memory writes, so one bot's guess in a debate can't become a "fact" in long-term memory.
+- **Local and single-user.** The server binds to 127.0.0.1 and accepts requests only from local pages; the React front end was chosen so it can later be wrapped in Electron or Tauri.
+
 ## Engineering highlights
 
 - **Durable scheduler.** Each chat room has a persistent queue and append-only event log. Messages are idempotent by client-generated ID, a crashed or interrupted round is recovered on restart and recorded as "interrupted", and the queue keeps going. A global limiter caps concurrent CLI processes across rooms.
