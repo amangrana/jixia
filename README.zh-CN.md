@@ -1,5 +1,7 @@
 # jixia（稷下）
 
+[![tests](https://github.com/amangrana/jixia/actions/workflows/test.yml/badge.svg)](https://github.com/amangrana/jixia/actions/workflows/test.yml)
+
 程序里显示的名字是“稷下”，项目和代码里仍叫 jixia。当前可以在浏览器里使用：多个群、@ 路由、消息排队、长期记忆、对话过长时的自动压缩都已接通。
 
 这个项目是我指挥 AI 编程 agent（Claude Code 和 Codex）写成的：需求和约束、设计文档、关键的设计取舍、审查 agent 的工作，以及测试策略和验收由我负责。

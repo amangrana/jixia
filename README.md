@@ -1,5 +1,7 @@
 # jixia (稷下)
 
+[![tests](https://github.com/amangrana/jixia/actions/workflows/test.yml/badge.svg)](https://github.com/amangrana/jixia/actions/workflows/test.yml)
+
 A local group chat where several AI assistants answer and debate the same question together. Today it puts **Claude (via Claude Code)** and **ChatGPT (via Codex CLI)** in one chat room, with @-routing, a persistent message queue, shared and per-bot long-term memory, and automatic context compaction.
 
 The name comes from the Jixia Academy of ancient China, where scholars of rival schools gathered to debate.
