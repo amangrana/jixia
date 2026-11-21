@@ -1,6 +1,6 @@
 # jixia 设计文档 v1
 
-Nov 14, 2026 · @Nick Wang
+Nov 14, 2026 · amangrana (Nick)
 
 ## 目标与范围
 
